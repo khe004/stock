@@ -16,6 +16,17 @@
 
 ## 安装
 
+### macOS 一键部署（推荐）
+
+```bash
+bash scripts/setup_mac.sh          # 默认每天 07:00 自动运行
+bash scripts/setup_mac.sh 08:30    # 或指定其他时间
+```
+
+脚本会创建 `.venv` 虚拟环境、安装依赖、注册 launchd 定时任务（比 cron 好在：Mac 睡眠中错过的任务会在唤醒后补跑）。取消任务的命令见脚本输出。
+
+### 手动安装
+
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # 填入 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID（可选）
