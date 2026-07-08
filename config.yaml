@@ -1,0 +1,52 @@
+# 个人量化信号平台配置
+database: data/quant.db
+history_start: "2015-01-01"
+
+# 关注列表（按组划分，策略通过 groups 指定作用范围）
+watchlist:
+  broad:                # 大盘 ETF
+    - SPY
+    - QQQ
+    - IWM
+    - DIA
+  sectors:              # 行业 ETF（动量轮动宇宙）
+    - XLK
+    - XLV
+    - XLF
+    - XLY
+    - XLP
+    - XLE
+    - XLI
+    - XLB
+    - XLU
+    - XLRE
+    - XLC
+  themes:               # 热门主题 ETF
+    - SMH               # 半导体（含美光等 DRAM/存储厂商）
+    - SOXX              # 半导体
+    - IGV               # 软件
+  assets:               # 资产类 ETF
+    - TLT               # 长期国债
+    - GLD               # 黄金
+    - IBIT              # 比特币
+
+strategies:
+  sma_cross:
+    enabled: true
+    fast: 20
+    slow: 60
+    groups: [broad, themes, assets]
+  momentum:
+    enabled: true
+    lookback_days: 63   # 约 3 个月
+    top_n: 3
+    groups: [sectors]
+  rsi_reversal:
+    enabled: true
+    period: 14
+    oversold: 30
+    overbought: 70
+    groups: [broad, sectors, themes, assets]
+
+notify:
+  telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
