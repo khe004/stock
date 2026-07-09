@@ -29,6 +29,9 @@ def test_single_winning_trade():
     assert result.win_rate == 1.0
     assert result.max_drawdown == pytest.approx(0.0, abs=1e-9)
     assert result.equity.iloc[-1] == pytest.approx(11_000)
+    assert result.trades[0]["entry_date"] == d[0]
+    assert result.trades[0]["exit_date"] == d[10]
+    assert result.open_position is None
 
 
 def test_losing_trade_and_drawdown():
@@ -56,6 +59,7 @@ def test_duplicate_buy_ignored_and_open_position_marked_to_market():
     result = run_backtest(df, [sig(d[0], BUY, 100), sig(d[2], BUY, 105)], "TEST", "s")
     assert result.num_trades == 0  # 未平仓不算完成交易
     assert result.equity.iloc[-1] == pytest.approx(11_000)
+    assert result.open_position == {"entry_date": d[0], "entry": 100.0}
 
 
 def test_other_symbol_signals_filtered_out():

@@ -24,6 +24,7 @@ class BacktestResult:
     num_trades: int
     equity: pd.Series = field(repr=False)
     trades: list[dict] = field(repr=False)
+    open_position: dict | None = field(default=None, repr=False)
 
     def metrics(self) -> dict:
         return {
@@ -52,6 +53,7 @@ def run_backtest(
     cash = initial_cash
     shares = 0.0
     entry_price = 0.0
+    entry_date = ""
     trades: list[dict] = []
     equity_values = []
 
@@ -62,15 +64,18 @@ def run_backtest(
             shares = cash / price
             cash = 0.0
             entry_price = price
+            entry_date = ts.strftime("%Y-%m-%d")
         elif direction == SELL and shares > 0:
             cash = shares * price
             trades.append({
+                "entry_date": entry_date, "exit_date": ts.strftime("%Y-%m-%d"),
                 "entry": entry_price, "exit": price,
                 "pnl_pct": price / entry_price - 1,
-                "date": ts.strftime("%Y-%m-%d"),
             })
             shares = 0.0
         equity_values.append(cash + shares * price)
+
+    open_position = {"entry_date": entry_date, "entry": entry_price} if shares > 0 else None
 
     equity = pd.Series(equity_values, index=df.index, name="equity")
     if equity.empty:
@@ -103,4 +108,5 @@ def run_backtest(
         num_trades=len(trades),
         equity=equity,
         trades=trades,
+        open_position=open_position,
     )
