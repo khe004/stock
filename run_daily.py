@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from quant import strategies
 from quant.config import ROOT, load_config
 from quant.data import fetcher, store
-from quant.notify import telegram
+from quant.notify import email, telegram
 from quant.strategies.base import BUY
 
 log = logging.getLogger("run_daily")
@@ -32,6 +32,17 @@ def setup_logging() -> None:
             logging.FileHandler(log_dir / "quant.log", encoding="utf-8"),
         ],
     )
+
+
+def dispatch(cfg, subject: str, text: str) -> bool:
+    """把消息发到所有启用渠道，全部送达才返回 True。
+    某渠道失败时信号保持未通知，下次运行整体重发（成功过的渠道会收到重复）。"""
+    ok = True
+    if cfg.telegram_enabled:
+        ok = telegram.send_message(text) and ok
+    if cfg.email_enabled:
+        ok = email.send_email(subject, text) and ok
+    return ok
 
 
 def format_message(rows) -> str:
@@ -86,14 +97,15 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_notify:
         pending = store.unnotified_signals(conn)
         if pending:
-            ok = telegram.send_message(format_message(pending))
+            subject = f"📈 量化信号 {as_of}（{len(pending)} 条）"
+            ok = dispatch(cfg, subject, format_message(pending))
             if ok:
                 store.mark_notified(conn, [r["id"] for r in pending])
-            log.info("推送 %d 条信号%s", len(pending), "" if ok else "（Telegram 未发送，已打印）")
+            log.info("推送 %d 条信号%s", len(pending), "" if ok else "（部分渠道失败，下次运行重试）")
         else:
             log.info("今日无新信号")
         if failed:
-            telegram.send_message(f"⚠️ 数据更新失败: {', '.join(failed)}，信号可能不完整")
+            dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {', '.join(failed)}，信号可能不完整")
 
     return 0
 

@@ -50,3 +50,4 @@ strategies:
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+  email: true           # 需在 .env 配置 SMTP_HOST / SMTP_USER / SMTP_PASSWORD / EMAIL_TO

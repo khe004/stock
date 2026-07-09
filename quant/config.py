@@ -51,6 +51,10 @@ class Config:
     def telegram_enabled(self) -> bool:
         return bool(self.raw.get("notify", {}).get("telegram", False))
 
+    @property
+    def email_enabled(self) -> bool:
+        return bool(self.raw.get("notify", {}).get("email", False))
+
 
 def load_config(path: Path | None = None) -> Config:
     load_dotenv(ROOT / ".env")
