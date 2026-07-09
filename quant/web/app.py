@@ -11,7 +11,7 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from quant import strategies
-from quant.backtest.engine import run_backtest
+from quant.backtest.engine import TRADING_DAYS, run_backtest
 from quant.config import load_config
 from quant.data import store
 from quant.strategies.base import BUY
@@ -229,7 +229,25 @@ def render_backtest():
     for col, (k, v) in zip(cols, result.metrics().items()):
         col.metric(k, v)
 
-    eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="权益"))
+    # 不折腾基准：区间首日买入、一直长持
+    close = window["close"]
+    bh_total = float(close.iloc[-1] / close.iloc[0]) - 1
+    bh_cagr = (1 + bh_total) ** (TRADING_DAYS / len(window)) - 1
+    excess = result.total_return - bh_total
+    st.markdown("**不折腾基准（区间首日买入长持）**")
+    bh_cols = st.columns(6)
+    bh_cols[0].metric("长持收益", f"{bh_total:+.1%}")
+    bh_cols[1].metric("长持年化", f"{bh_cagr:+.1%}")
+    bh_cols[2].metric("策略超额收益", f"{excess:+.1%}",
+                      delta=f"{'跑赢' if excess > 0 else '跑输'}长持",
+                      delta_color="normal" if excess > 0 else "inverse")
+
+    eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="策略权益"))
+    initial_cash = float(result.equity.iloc[0])
+    eq.add_trace(go.Scatter(
+        x=window.index, y=initial_cash * close / close.iloc[0],
+        mode="lines", name="长持基准", line=dict(dash="dash", color="#888"),
+    ))
     entries = [(t["entry_date"], t["entry"]) for t in result.trades]
     if result.open_position:
         entries.append((result.open_position["entry_date"], result.open_position["entry"]))
