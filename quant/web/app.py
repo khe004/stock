@@ -229,24 +229,46 @@ def render_backtest():
     for col, (k, v) in zip(cols, result.metrics().items()):
         col.metric(k, v)
 
-    # 不折腾基准：区间首日买入、一直长持
+    # 不折腾基准一：区间首日买入、一直长持
     close = window["close"]
+    initial_cash = float(result.equity.iloc[0])
     bh_total = float(close.iloc[-1] / close.iloc[0]) - 1
     bh_cagr = (1 + bh_total) ** (TRADING_DAYS / len(window)) - 1
-    excess = result.total_return - bh_total
-    st.markdown("**不折腾基准（区间首日买入长持）**")
+
+    # 不折腾基准二：按月定投——同一笔初始资金按月份等分，
+    # 每月第一个交易日买入一份，未投入部分按现金（无息）计
+    month_firsts = set(close.groupby([close.index.year, close.index.month]).head(1).index)
+    per_month = initial_cash / len(month_firsts)
+    dca_cash, dca_shares, dca_values = initial_cash, 0.0, []
+    for ts, price in close.items():
+        if ts in month_firsts:
+            dca_shares += per_month / float(price)
+            dca_cash -= per_month
+        dca_values.append(dca_cash + dca_shares * float(price))
+    dca = pd.Series(dca_values, index=close.index)
+    dca_total = float(dca.iloc[-1]) / initial_cash - 1
+    dca_cagr = (1 + dca_total) ** (TRADING_DAYS / len(window)) - 1
+
+    st.markdown("**不折腾基准对比**（长持=区间首日全仓买入；定投=同一笔资金按月等分、每月首个交易日买入）")
     bh_cols = st.columns(6)
     bh_cols[0].metric("长持收益", f"{bh_total:+.1%}")
     bh_cols[1].metric("长持年化", f"{bh_cagr:+.1%}")
-    bh_cols[2].metric("策略超额收益", f"{excess:+.1%}",
-                      delta=f"{'跑赢' if excess > 0 else '跑输'}长持",
-                      delta_color="normal" if excess > 0 else "inverse")
+    bh_cols[2].metric("定投收益", f"{dca_total:+.1%}")
+    bh_cols[3].metric("定投年化", f"{dca_cagr:+.1%}")
+    for col, (label, base) in zip(bh_cols[4:], (("长持", bh_total), ("定投", dca_total))):
+        excess = result.total_return - base
+        col.metric(f"策略 vs {label}", f"{excess:+.1%}",
+                   delta=f"{'跑赢' if excess > 0 else '跑输'}{label}",
+                   delta_color="normal" if excess > 0 else "inverse")
 
     eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="策略权益"))
-    initial_cash = float(result.equity.iloc[0])
     eq.add_trace(go.Scatter(
         x=window.index, y=initial_cash * close / close.iloc[0],
         mode="lines", name="长持基准", line=dict(dash="dash", color="#888"),
+    ))
+    eq.add_trace(go.Scatter(
+        x=dca.index, y=dca,
+        mode="lines", name="定投基准", line=dict(dash="dot", color="#bc8f5f"),
     ))
     entries = [(t["entry_date"], t["entry"]) for t in result.trades]
     if result.open_position:
