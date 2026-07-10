@@ -2,6 +2,9 @@
 database: data/quant.db
 history_start: "2015-01-01"
 
+backtest:
+  cost_bps: 5           # 单边交易成本（基点，万5），戳破零成本换仓的虚高
+
 # 关注列表（按组划分，策略通过 groups 指定作用范围）
 watchlist:
   broad:                # 大盘 ETF
@@ -47,6 +50,18 @@ strategies:
     oversold: 30
     overbought: 70
     groups: [broad, sectors, themes, assets]
+  smart_dca:              # 定投+信号开关：死叉暂停积攒，金叉恢复补投
+    enabled: true
+    symbol: SPY
+    fast: 20
+    slow: 60
+    groups: [broad]
+  dual_momentum:          # GEM 双动量：动量转负切换避险资产
+    enabled: true
+    lookback_days: 252    # 约 12 个月
+    risk_assets: [SPY, QQQ]
+    safe_asset: TLT
+    groups: [broad, assets]
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

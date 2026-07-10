@@ -11,10 +11,17 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from quant import strategies
-from quant.backtest.engine import TRADING_DAYS, run_backtest
+from quant.backtest.engine import (
+    dca_equity,
+    equity_metrics,
+    hold_equity,
+    run_backtest,
+    run_portfolio_backtest,
+    run_smart_dca_backtest,
+)
 from quant.config import load_config
 from quant.data import store
-from quant.strategies.base import BUY
+from quant.strategies.base import BUY, Signal, price_series
 from quant.strategies.rsi_reversal import wilder_rsi
 
 st.set_page_config(page_title="个人量化信号", page_icon="📈", layout="wide")
@@ -55,12 +62,13 @@ def add_signal_markers(fig, sigs: pd.DataFrame, row: int | None = None):
         ), **kw)
 
 
-def group_closes(group_key: str) -> pd.DataFrame:
+def group_closes(group_key: str, adjusted: bool = False) -> pd.DataFrame:
+    """adjusted=True 时用 adj_close（总回报口径），用于收益/动量比较。"""
     frames = {}
     for s in cfg.watchlist.get(group_key, []):
         df = store.load_prices(conn, s)
         if not df.empty:
-            frames[s] = df["close"]
+            frames[s] = price_series(df) if adjusted else df["close"]
     return pd.DataFrame(frames)
 
 
@@ -126,7 +134,7 @@ def render_kline():
         fig.add_hrect(y0=RSI_OVERBOUGHT, y1=100, fillcolor=SELL_COLOR, opacity=0.07, line_width=0, row=2, col=1)
 
         fig.add_trace(go.Scatter(
-            x=prices.index, y=close.pct_change(MOM_LOOKBACK, fill_method=None),
+            x=prices.index, y=price_series(prices).pct_change(MOM_LOOKBACK, fill_method=None),
             mode="lines", name=f"动量(近{MOM_LOOKBACK}日)", line=dict(width=1, color="#8c564b"),
         ), row=3, col=1)
         fig.add_hline(y=0, line_dash="dot", line_color="#888", row=3, col=1)
@@ -138,11 +146,11 @@ def render_kline():
         fig.update_yaxes(title_text="动量", tickformat=".0%", row=3, col=1)
         st.plotly_chart(fig, width="stretch")
 
-    st.subheader("分组对比（归一化，区间起点 = 100）")
+    st.subheader("分组对比（归一化总回报，区间起点 = 100，含分红）")
     range_label = st.radio("区间", list(RANGE_OPTIONS), index=2, horizontal=True)
     days = RANGE_OPTIONS[range_label]
     for group_key, title in (("broad", "大盘 ETF"), ("sectors", "行业 ETF"), ("assets", "资产类 ETF")):
-        closes = group_closes(group_key).dropna(how="all")
+        closes = group_closes(group_key, adjusted=True).dropna(how="all")
         if closes.empty:
             continue
         if days:
@@ -159,7 +167,7 @@ def render_kline():
 
 def render_momentum_rank():
     st.title("动量排名（行业 ETF）")
-    closes = group_closes("sectors")
+    closes = group_closes("sectors", adjusted=True)  # 总回报口径，与 momentum 策略一致
     rets = closes.pct_change(MOM_LOOKBACK, fill_method=None).dropna(how="all")
     if rets.empty:
         st.warning("行情数据不足（需要至少 63 个交易日），先运行 python run_daily.py 拉取数据")
@@ -198,118 +206,263 @@ def render_momentum_rank():
     st.plotly_chart(rfig, width="stretch")
 
 
-def render_backtest():
-    st.title("回测")
-    col1, col2 = st.columns(2)
-    strategy_name = col1.selectbox("策略", strategy_names)
-    params = strategy_params[strategy_name]
-    group_symbols = cfg.symbols_for(params.get("groups", []))
-    symbol = col2.selectbox("标的", group_symbols)
+PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum"}
+INITIAL_CASH = 10_000.0
 
+RISK_COLS = {
+    "total_return": "总收益", "cagr": "年化收益", "max_drawdown": "最大回撤",
+    "volatility": "年化波动", "sharpe": "夏普", "calmar": "Calmar",
+}
+
+
+def date_window(df: pd.DataFrame, key: str) -> pd.DataFrame | None:
+    min_d, max_d = df.index[0].date(), df.index[-1].date()
+    start, end = st.slider("时间区间", min_value=min_d, max_value=max_d,
+                           value=(min_d, max_d), key=key)
+    window = df.loc[str(start):str(end)]
+    if len(window) < 2:
+        st.warning("选中区间数据不足")
+        return None
+    return window
+
+
+def metric_cards(metrics: dict):
+    cols = st.columns(6)
+    for col, (k, v) in zip(cols, metrics.items()):
+        col.metric(k, v)
+
+
+def excess_chips(strategy_total: float, benchmarks: dict[str, float]):
+    cols = st.columns(6)
+    for col, (label, base) in zip(cols, benchmarks.items()):
+        excess = strategy_total - base
+        col.metric(f"策略 vs {label}", f"{excess:+.1%}",
+                   delta=f"{'跑赢' if excess > 0 else '跑输'}{label}",
+                   delta_color="normal" if excess > 0 else "inverse")
+
+
+def risk_table(rows: dict[str, pd.Series]):
+    """rows: 名称 -> 权益曲线（同一本金起步）。逐列高亮最优值。"""
+    table = pd.DataFrame({name: equity_metrics(eq, INITIAL_CASH) for name, eq in rows.items()}).T
+    table = table.rename(columns=RISK_COLS)
+
+    def highlight(col):
+        best = col.min() if col.name == "年化波动" else col.max()
+        return ["background-color: #e8f5e9; font-weight: bold" if v == best else "" for v in col]
+
+    styler = (table.style.apply(highlight, axis=0)
+              .format({"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
+                       "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}))
+    st.markdown("**风险收益对比**（绿色=该列最优；Calmar=年化收益÷最大回撤，回撤小、收益稳才高）")
+    st.dataframe(styler, width="stretch")
+
+
+def trades_table(trades: list[dict], with_symbol: bool = False):
+    if not trades:
+        return
+    st.subheader("交易明细")
+    cols = (["symbol"] if with_symbol else []) + ["entry_date", "exit_date", "entry", "exit", "pnl_pct"]
+    names = (["标的"] if with_symbol else []) + ["买入日", "卖出日", "买入价", "卖出价", "收益"]
+    df = pd.DataFrame(trades)[cols]
+    df.columns = names
+
+    def pnl_style(v):
+        return f"color: {BUY_FG}" if v > 0 else f"color: {SELL_FG}"
+
+    styler = (df.style.map(pnl_style, subset=["收益"])
+              .format({"买入价": "{:.2f}", "卖出价": "{:.2f}", "收益": "{:+.2%}"}))
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+
+def equity_markers(fig, equity: pd.Series, entries: list[str], exits: list[str],
+                   entry_texts: list[str] | None = None, exit_texts: list[str] | None = None):
+    for dates_raw, texts, name, shape, color in (
+        (entries, entry_texts, "买入", "triangle-up", BUY_COLOR),
+        (exits, exit_texts, "卖出", "triangle-down", SELL_COLOR),
+    ):
+        pairs = [(pd.Timestamp(d), (texts[i] if texts else ""))
+                 for i, d in enumerate(dates_raw) if pd.Timestamp(d) in equity.index]
+        if pairs:
+            dates = [p[0] for p in pairs]
+            fig.add_trace(go.Scatter(
+                x=dates, y=equity.loc[dates], mode="markers", name=name,
+                marker=dict(symbol=shape, size=12, color=color),
+                hovertext=[p[1] for p in pairs],
+            ))
+
+
+def _render_single_bt(strategy_name: str, params: dict):
+    group_symbols = cfg.symbols_for(params.get("groups", []))
+    symbol = st.selectbox("标的", group_symbols)
     prices = {s: store.load_prices(conn, s) for s in group_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}
     if symbol not in prices:
         st.warning("库内没有该标的行情，先运行 python run_daily.py 拉取数据")
         return
-
-    df_full = prices[symbol]
-    min_d, max_d = df_full.index[0].date(), df_full.index[-1].date()
-    start, end = st.slider("时间区间", min_value=min_d, max_value=max_d, value=(min_d, max_d))
-    window = df_full.loc[str(start):str(end)]
-    if len(window) < 2:
-        st.warning("选中区间数据不足")
+    window = date_window(prices[symbol], key=f"single_{strategy_name}")
+    if window is None:
         return
-    st.caption("信号在全量历史上生成（指标不受区间影响）；持仓从区间内第一个买入信号开始，所有指标只统计区间内的表现。")
+    st.caption(f"信号在全量历史上生成（指标不受区间影响）；持仓从区间内第一个买入信号开始。"
+               f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。同为期初一次性投入，基准只对比长持。")
 
     strat = strategies.build(strategy_name, params)
     sigs = strat.generate(prices)
-    result = run_backtest(window, sigs, symbol, strategy_name)
+    result = run_backtest(window, sigs, symbol, strategy_name, INITIAL_CASH, cfg.cost_bps)
+    metric_cards(result.metrics())
 
-    cols = st.columns(6)
-    for col, (k, v) in zip(cols, result.metrics().items()):
-        col.metric(k, v)
-
-    # 不折腾基准一：区间首日买入、一直长持
-    close = window["close"]
-    initial_cash = float(result.equity.iloc[0])
-    bh_total = float(close.iloc[-1] / close.iloc[0]) - 1
-    bh_cagr = (1 + bh_total) ** (TRADING_DAYS / len(window)) - 1
-
-    # 不折腾基准二：按月定投——同一笔初始资金按月份等分，
-    # 每月第一个交易日买入一份，未投入部分按现金（无息）计
-    month_firsts = set(close.groupby([close.index.year, close.index.month]).head(1).index)
-    per_month = initial_cash / len(month_firsts)
-    dca_cash, dca_shares, dca_values = initial_cash, 0.0, []
-    for ts, price in close.items():
-        if ts in month_firsts:
-            dca_shares += per_month / float(price)
-            dca_cash -= per_month
-        dca_values.append(dca_cash + dca_shares * float(price))
-    dca = pd.Series(dca_values, index=close.index)
-    dca_total = float(dca.iloc[-1]) / initial_cash - 1
-    dca_cagr = (1 + dca_total) ** (TRADING_DAYS / len(window)) - 1
-
-    st.markdown("**不折腾基准对比**（长持=区间首日全仓买入；定投=同一笔资金按月等分、每月首个交易日买入）")
-    bh_cols = st.columns(6)
-    bh_cols[0].metric("长持收益", f"{bh_total:+.1%}")
-    bh_cols[1].metric("长持年化", f"{bh_cagr:+.1%}")
-    bh_cols[2].metric("定投收益", f"{dca_total:+.1%}")
-    bh_cols[3].metric("定投年化", f"{dca_cagr:+.1%}")
-    for col, (label, base) in zip(bh_cols[4:], (("长持", bh_total), ("定投", dca_total))):
-        excess = result.total_return - base
-        col.metric(f"策略 vs {label}", f"{excess:+.1%}",
-                   delta=f"{'跑赢' if excess > 0 else '跑输'}{label}",
-                   delta_color="normal" if excess > 0 else "inverse")
+    px = price_series(window)
+    hold = hold_equity(px, INITIAL_CASH, cfg.cost_bps)
+    excess_chips(result.total_return, {
+        "长持": float(hold.iloc[-1]) / INITIAL_CASH - 1,
+    })
+    risk_table({"策略": result.equity, "长持": hold})
 
     eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="策略权益"))
-    eq.add_trace(go.Scatter(
-        x=window.index, y=initial_cash * close / close.iloc[0],
-        mode="lines", name="长持基准", line=dict(dash="dash", color="#888"),
-    ))
-    eq.add_trace(go.Scatter(
-        x=dca.index, y=dca,
-        mode="lines", name="定投基准", line=dict(dash="dot", color="#bc8f5f"),
-    ))
-    entries = [(t["entry_date"], t["entry"]) for t in result.trades]
+    eq.add_trace(go.Scatter(x=hold.index, y=hold, mode="lines", name="长持基准",
+                            line=dict(dash="dash", color="#888")))
+    entries = [t["entry_date"] for t in result.trades]
     if result.open_position:
-        entries.append((result.open_position["entry_date"], result.open_position["entry"]))
-    exits = [(t["exit_date"], t["exit"]) for t in result.trades]
-    for points, name, sym_shape, color in (
-        (entries, "买入", "triangle-up", BUY_COLOR),
-        (exits, "卖出", "triangle-down", SELL_COLOR),
-    ):
-        dates = [pd.Timestamp(d) for d, _ in points if pd.Timestamp(d) in result.equity.index]
-        if dates:
-            eq.add_trace(go.Scatter(
-                x=dates, y=result.equity.loc[dates], mode="markers", name=name,
-                marker=dict(symbol=sym_shape, size=12, color=color),
-            ))
+        entries.append(result.open_position["entry_date"])
+    equity_markers(eq, result.equity, entries, [t["exit_date"] for t in result.trades])
     eq.update_layout(height=400, title=f"{symbol} · {strategy_name} 权益曲线（{result.start} ~ {result.end}）")
     st.plotly_chart(eq, width="stretch")
 
-    if result.trades:
-        st.subheader("交易明细")
-        trades = pd.DataFrame(result.trades)[["entry_date", "exit_date", "entry", "exit", "pnl_pct"]]
-        trades.columns = ["买入日", "卖出日", "买入价", "卖出价", "收益"]
-
-        def pnl_style(v):
-            return f"color: {BUY_FG}" if v > 0 else f"color: {SELL_FG}"
-
-        styler = (trades.style.map(pnl_style, subset=["收益"])
-                        .format({"买入价": "{:.2f}", "卖出价": "{:.2f}", "收益": "{:+.2%}"}))
-        st.dataframe(styler, width="stretch", hide_index=True)
+    trades_table(result.trades)
     if result.open_position:
         st.caption(f"区间末仍持仓：{result.open_position['entry_date']} 以 ${result.open_position['entry']:.2f} 买入，未平仓部分按区间末市值计入指标。")
+
+
+def _render_portfolio_bt(strategy_name: str, params: dict):
+    universe = cfg.symbols_for(params.get("groups", []))
+    prices = {s: store.load_prices(conn, s) for s in universe}
+    prices = {s: df for s, df in prices.items() if not df.empty}
+    if not prices:
+        st.warning("库内没有行情数据，先运行 python run_daily.py 拉取数据")
+        return
+    bench_symbol = "SPY" if "SPY" in prices else next(iter(prices))
+    bench_window = date_window(prices[bench_symbol], key=f"pf_{strategy_name}")
+    if bench_window is None:
+        return
+    start_str = bench_window.index[0].strftime("%Y-%m-%d")
+    end_str = bench_window.index[-1].strftime("%Y-%m-%d")
+    st.caption(f"组合轮动模式：资金始终在场内换仓，区间起点按区间之前的信号还原应有持仓。"
+               f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。"
+               f"基准为 {bench_symbol} 一次性长持（资金时间敞口一致才可比；定投基准只在智能定投模式提供）。")
+
+    strat = strategies.build(strategy_name, params)
+    sigs = strat.generate(prices)
+
+    # 区间前信号推出起点持仓，在区间首日合成买入
+    held: dict[str, None] = {}
+    for s in sorted((x for x in sigs if x.date < start_str), key=lambda x: x.date):
+        if s.direction == BUY:
+            held.setdefault(s.symbol)
+        else:
+            held.pop(s.symbol, None)
+    synth = [Signal(date=start_str, symbol=sym, strategy=strategy_name, direction=BUY,
+                    price=0.0, strength=0.5, reason="区间起点已持有（承接区间前信号）")
+             for sym in held]
+    in_window = [s for s in sigs if start_str <= s.date <= end_str]
+
+    window_prices = {s: df.loc[start_str:end_str] for s, df in prices.items()}
+    window_prices = {s: df for s, df in window_prices.items() if not df.empty}
+    result = run_portfolio_backtest(window_prices, synth + in_window, strategy_name,
+                                    INITIAL_CASH, cfg.cost_bps)
+    metric_cards(result.metrics())
+
+    px = price_series(bench_window)
+    hold = hold_equity(px, INITIAL_CASH, cfg.cost_bps)
+    strategy_total = equity_metrics(result.equity, INITIAL_CASH)["total_return"]
+    excess_chips(strategy_total, {
+        f"{bench_symbol}长持": float(hold.iloc[-1]) / INITIAL_CASH - 1,
+    })
+    risk_table({"策略组合": result.equity, f"{bench_symbol}长持": hold})
+
+    eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="策略组合"))
+    eq.add_trace(go.Scatter(x=hold.index, y=hold, mode="lines", name=f"{bench_symbol}长持",
+                            line=dict(dash="dash", color="#888")))
+    entries = [t["entry_date"] for t in result.trades] + [p["entry_date"] for p in result.open_positions]
+    entry_texts = [t["symbol"] for t in result.trades] + [p["symbol"] for p in result.open_positions]
+    equity_markers(eq, result.equity, entries, [t["exit_date"] for t in result.trades],
+                   entry_texts, [t["symbol"] for t in result.trades])
+    eq.update_layout(height=400, title=f"{strategy_name} 组合权益曲线（{result.start} ~ {result.end}）")
+    st.plotly_chart(eq, width="stretch")
+
+    trades_table(result.trades, with_symbol=True)
+    if result.open_positions:
+        names = ", ".join(f"{p['symbol']}（{p['entry_date']} 买入）" for p in result.open_positions)
+        st.caption(f"区间末持仓：{names}，按区间末市值计入指标。")
+
+
+def _render_smart_dca_bt(params: dict):
+    symbol = params.get("symbol", "SPY")
+    df_full = store.load_prices(conn, symbol)
+    if df_full.empty:
+        st.warning("库内没有该标的行情，先运行 python run_daily.py 拉取数据")
+        return
+    window = date_window(df_full, key="smart_dca")
+    if window is None:
+        return
+    st.caption(f"智能定投模式（{symbol}）：每月首个交易日定投一份；死叉期暂停积攒，金叉恢复当日一次性补投。"
+               f"对照组为同一笔资金的纯定投（投入节奏一致，可比）与长持。"
+               f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。")
+
+    fast, slow = params.get("fast", 20), params.get("slow", 60)
+    result = run_smart_dca_backtest(window, fast, slow, INITIAL_CASH, cfg.cost_bps)
+    metric_cards(result.metrics())
+
+    px = price_series(window)
+    hold = hold_equity(px, INITIAL_CASH, cfg.cost_bps)
+    dca = dca_equity(px, INITIAL_CASH, cfg.cost_bps)
+    smart_total = equity_metrics(result.equity, INITIAL_CASH)["total_return"]
+    excess_chips(smart_total, {
+        "纯定投": float(dca.iloc[-1]) / INITIAL_CASH - 1,
+        "长持": float(hold.iloc[-1]) / INITIAL_CASH - 1,
+    })
+    risk_table({"智能定投": result.equity, "纯定投": dca, "长持": hold})
+
+    eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="智能定投"))
+    eq.add_trace(go.Scatter(x=dca.index, y=dca, mode="lines", name="纯定投",
+                            line=dict(dash="dot", color="#bc8f5f")))
+    eq.add_trace(go.Scatter(x=hold.index, y=hold, mode="lines", name="长持",
+                            line=dict(dash="dash", color="#888")))
+    for span_start, span_end in result.paused_spans:
+        eq.add_vrect(x0=span_start, x1=span_end, fillcolor=SELL_COLOR, opacity=0.06, line_width=0)
+    topups = [pd.Timestamp(d) for d in result.topup_dates if pd.Timestamp(d) in result.equity.index]
+    if topups:
+        eq.add_trace(go.Scatter(
+            x=topups, y=result.equity.loc[topups], mode="markers", name="金叉补投",
+            marker=dict(symbol="star", size=14, color=BUY_COLOR),
+        ))
+    eq.update_layout(height=400,
+                     title=f"{symbol} 智能定投 vs 纯定投（{result.start} ~ {result.end}，红色底纹=暂停定投区段）")
+    st.plotly_chart(eq, width="stretch")
+
+
+def render_backtest():
+    st.title("回测")
+    strategy_name = st.selectbox("策略", strategy_names)
+    params = strategy_params[strategy_name]
+    if strategy_name in PORTFOLIO_STRATEGIES:
+        _render_portfolio_bt(strategy_name, params)
+    elif strategy_name == "smart_dca":
+        _render_smart_dca_bt(params)
+    else:
+        _render_single_bt(strategy_name, params)
 
 
 def render_strategy_docs():
     st.title("策略说明")
     sma = strategy_params.get("sma_cross", {"fast": 20, "slow": 60})
+    sdca = strategy_params.get("smart_dca", {"symbol": "SPY", "fast": 20, "slow": 60})
+    dm = strategy_params.get("dual_momentum",
+                             {"lookback_days": 252, "risk_assets": ["SPY", "QQQ"], "safe_asset": "TLT"})
     st.markdown(f"""
-## 三个策略如何配合
+## 策略如何配合
 
 **双均线管大方向**（该在场内还是场外）→ **动量管配置**（钱放哪个板块）→ **RSI 管时机**（回调到哪天动手）。
 同一天出现矛盾信号时以大方向为准：大盘死叉之下的逆势买入信号，轻仓或忽略。
+**智能定投**和**双动量**是独立的完整打法（自带仓位规则），直接以"跑赢定投"为目标，可作为主力策略单独执行。
 
 ---
 
@@ -356,7 +509,45 @@ def render_strategy_docs():
 
 ---
 
-*参数在 `config.yaml` 中修改，本页数值实时读取当前配置。提醒：不要为了回测曲线好看精调参数——那是过拟合；当前默认值是学术与实务中最常用的取值。*
+## 4. smart_dca 智能定投（定投 + 趋势开关）
+
+**直觉**：定投的弱点是熊市里持续接飞刀。给定投装一个趋势开关：趋势向上正常投，
+趋势向下把钱攒着，趋势恢复时把攒的钱一次性投在相对低位。不追求跑赢牛市，追求熊市少挨打。
+
+**规则**：每月首个交易日为定投日。MA{sdca["fast"]} ≥ MA{sdca["slow"]}（复权价）→ 正常定投一份；
+死叉期暂停，份额累积；金叉恢复当日一次性补投全部累积款。信号每月至多一条，就是你的定投提醒。
+
+**何时灵**：有像样熊市的区间（2022 类）；暂停避开下跌主段，补投买在恢复初期。
+
+**何时坑**：单边慢牛里和纯定投几乎没差别（开关很少触发）；V 型急跌快速反转时，
+暂停错过的底部比补投买回的更便宜，会小幅跑输纯定投。
+
+**作用范围**：{sdca["symbol"]}（config 可改）。
+
+---
+
+## 5. dual_momentum 双动量 GEM（绝对动量 + 相对动量）
+
+**直觉**：相对动量选最强的风险资产，绝对动量决定要不要在场——过去 12 个月连绝对收益都是负的，
+说明整体是熊市，切到避险资产等风暴过去。经典 Gary Antonacci GEM 打法，牛市跟上、熊市少亏。
+
+**规则**：每月首个交易日，比较 {", ".join(dm["risk_assets"])} 近 {dm["lookback_days"]} 日总回报（复权价）：
+最强者为正 → 持有它；为负 → 切换到 {dm["safe_asset"]}。目标变化才换仓，每月至多一次。
+
+**何时灵**：趋势分明的大级别行情，尤其是漫长熊市（2000、2008 型），避险腿的价值全在这里。
+
+**何时坑**：两点必须知道。一是**震荡年的鞭打**：动量在正负之间反复横跳，来回换仓两头挨耳光；
+二是**{dm["safe_asset"]} 的久期风险**：TLT 是 20 年长债，2022 年加息导致股债双杀，
+它不但没避险反而放大回撤——如果更在意这种情形，可把 `safe_asset` 换成短债 BIL（近似现金）。
+另外它的收益大头是票息，回测必须用复权价（本平台已是）。
+
+**作用范围**：风险腿 {", ".join(dm["risk_assets"])}，避险腿 {dm["safe_asset"]}（均可在 config 修改）。
+
+---
+
+*参数在 `config.yaml` 中修改，本页数值实时读取当前配置。回测统一使用复权价（含分红）
+与 `backtest.cost_bps` 单边成本。提醒：不要为了回测曲线好看精调参数——那是过拟合；
+当前默认值是学术与实务中最常用的取值。*
 """)
 
 

@@ -1,10 +1,12 @@
 from quant.strategies.base import BUY, SELL, Signal, Strategy
+from quant.strategies.dual_momentum import DualMomentum
 from quant.strategies.momentum import Momentum
 from quant.strategies.rsi_reversal import RsiReversal
 from quant.strategies.sma_cross import SmaCross
+from quant.strategies.smart_dca import SmartDca
 
 REGISTRY: dict[str, type[Strategy]] = {
-    cls.name: cls for cls in (SmaCross, Momentum, RsiReversal)
+    cls.name: cls for cls in (SmaCross, Momentum, RsiReversal, SmartDca, DualMomentum)
 }
 
 

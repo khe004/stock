@@ -1,13 +1,64 @@
-"""信号驱动的多头回测：buy 全仓买入，sell 全部卖出，不考虑滑点手续费。"""
+"""回测引擎：单标的多头、组合轮动、智能定投三种模拟。
+
+统一口径：价格用 adj_close（总回报，含分红再投资）；cost_bps 为单边交易成本
+（万分之一为 1bp），买入少得份额、卖出少得现金。
+"""
 
 import math
 from dataclasses import dataclass, field
 
 import pandas as pd
 
-from quant.strategies.base import BUY, SELL, Signal
+from quant.strategies.base import BUY, SELL, Signal, price_series
 
 TRADING_DAYS = 252
+
+
+def equity_metrics(equity: pd.Series, initial_value: float | None = None) -> dict:
+    """从权益曲线计算风险收益指标，策略与各基准复用同一口径。
+    initial_value 为投入本金：首日若有建仓成本，权益首值会低于本金，
+    收益必须以本金为分母，否则成本被算没。"""
+    initial = float(initial_value) if initial_value else float(equity.iloc[0])
+    final = float(equity.iloc[-1])
+    total_return = final / initial - 1
+    n = len(equity)
+    cagr = (final / initial) ** (TRADING_DAYS / n) - 1 if final > 0 and n > 0 else -1.0
+    max_drawdown = float((equity / equity.cummax() - 1).min())
+    ret = equity.pct_change().dropna()
+    if len(ret) > 1 and ret.std() > 0:
+        volatility = float(ret.std() * math.sqrt(TRADING_DAYS))
+        sharpe = float(ret.mean() / ret.std() * math.sqrt(TRADING_DAYS))
+    else:
+        volatility, sharpe = 0.0, 0.0
+    calmar = cagr / abs(max_drawdown) if max_drawdown < 0 else 0.0
+    return {
+        "total_return": total_return,
+        "cagr": cagr,
+        "max_drawdown": max_drawdown,
+        "volatility": volatility,
+        "sharpe": sharpe,
+        "calmar": calmar,
+    }
+
+
+def hold_equity(px: pd.Series, initial_cash: float = 10_000.0, cost_bps: float = 0.0) -> pd.Series:
+    """长持基准：首日一次性买入（扣一次买入成本）。"""
+    shares = initial_cash * (1 - cost_bps / 1e4) / float(px.iloc[0])
+    return pd.Series(shares * px.to_numpy(dtype=float), index=px.index, name="hold")
+
+
+def dca_equity(px: pd.Series, initial_cash: float = 10_000.0, cost_bps: float = 0.0) -> pd.Series:
+    """纯定投基准：同一笔资金按月份等分，每月首个交易日买入一份（每笔扣买入成本）。"""
+    month_firsts = set(px.groupby([px.index.year, px.index.month]).head(1).index)
+    per = initial_cash / len(month_firsts)
+    bp = cost_bps / 1e4
+    cash, shares, values = initial_cash, 0.0, []
+    for ts, price in px.items():
+        if ts in month_firsts:
+            shares += per * (1 - bp) / float(price)
+            cash -= per
+        values.append(cash + shares * float(price))
+    return pd.Series(values, index=px.index, name="dca")
 
 
 @dataclass
@@ -43,70 +94,267 @@ def run_backtest(
     symbol: str,
     strategy: str,
     initial_cash: float = 10_000.0,
+    cost_bps: float = 0.0,
 ) -> BacktestResult:
-    """df: 该标的日线（close 列，DatetimeIndex 升序）；signals: 该标的该策略的全部信号。"""
+    """单标的多头回测：buy 全仓买入，sell 全部卖出。"""
     sig_by_date: dict[str, str] = {}
     for s in sorted(signals, key=lambda x: x.date):
         if s.symbol == symbol and s.strategy == strategy:
             sig_by_date[s.date] = s.direction
 
+    px = price_series(df)
+    bp = cost_bps / 1e4
     cash = initial_cash
     shares = 0.0
+    invested = 0.0
     entry_price = 0.0
     entry_date = ""
     trades: list[dict] = []
     equity_values = []
 
-    for ts, row in df.iterrows():
-        price = float(row["close"])
+    for ts, price in px.items():
+        price = float(price)
         direction = sig_by_date.get(ts.strftime("%Y-%m-%d"))
         if direction == BUY and shares == 0 and price > 0:
-            shares = cash / price
+            invested = cash
+            shares = cash * (1 - bp) / price
             cash = 0.0
             entry_price = price
             entry_date = ts.strftime("%Y-%m-%d")
         elif direction == SELL and shares > 0:
-            cash = shares * price
+            cash = shares * price * (1 - bp)
             trades.append({
                 "entry_date": entry_date, "exit_date": ts.strftime("%Y-%m-%d"),
                 "entry": entry_price, "exit": price,
-                "pnl_pct": price / entry_price - 1,
+                "pnl_pct": cash / invested - 1,
             })
             shares = 0.0
         equity_values.append(cash + shares * price)
 
     open_position = {"entry_date": entry_date, "entry": entry_price} if shares > 0 else None
 
-    equity = pd.Series(equity_values, index=df.index, name="equity")
+    equity = pd.Series(equity_values, index=px.index, name="equity")
     if equity.empty:
         raise ValueError("行情数据为空，无法回测")
 
-    final = float(equity.iloc[-1])
-    total_return = final / initial_cash - 1
-    n_days = len(equity)
-    cagr = (final / initial_cash) ** (TRADING_DAYS / n_days) - 1 if n_days > 0 and final > 0 else 0.0
-    max_drawdown = float((equity / equity.cummax() - 1).min())
-    daily_ret = equity.pct_change().dropna()
-    sharpe = (
-        float(daily_ret.mean() / daily_ret.std() * math.sqrt(TRADING_DAYS))
-        if len(daily_ret) > 1 and daily_ret.std() > 0
-        else 0.0
-    )
+    m = equity_metrics(equity, initial_cash)
     wins = sum(1 for t in trades if t["pnl_pct"] > 0)
-    win_rate = wins / len(trades) if trades else 0.0
 
     return BacktestResult(
         symbol=symbol,
         strategy=strategy,
-        start=df.index[0].strftime("%Y-%m-%d"),
-        end=df.index[-1].strftime("%Y-%m-%d"),
-        total_return=total_return,
-        cagr=cagr,
-        max_drawdown=max_drawdown,
-        sharpe=sharpe,
-        win_rate=win_rate,
+        start=px.index[0].strftime("%Y-%m-%d"),
+        end=px.index[-1].strftime("%Y-%m-%d"),
+        total_return=m["total_return"],
+        cagr=m["cagr"],
+        max_drawdown=m["max_drawdown"],
+        sharpe=m["sharpe"],
+        win_rate=wins / len(trades) if trades else 0.0,
         num_trades=len(trades),
         equity=equity,
         trades=trades,
         open_position=open_position,
+    )
+
+
+@dataclass
+class PortfolioBacktestResult:
+    strategy: str
+    start: str
+    end: str
+    win_rate: float
+    num_trades: int
+    equity: pd.Series = field(repr=False)
+    trades: list[dict] = field(repr=False)          # symbol/entry_date/exit_date/entry/exit/pnl_pct
+    open_positions: list[dict] = field(default_factory=list, repr=False)
+    initial_cash: float = 10_000.0
+
+    def metrics(self) -> dict:
+        m = equity_metrics(self.equity, self.initial_cash)
+        return {
+            "总收益": f"{m['total_return']:+.1%}",
+            "年化收益": f"{m['cagr']:+.1%}",
+            "最大回撤": f"{m['max_drawdown']:.1%}",
+            "夏普比率": f"{m['sharpe']:.2f}",
+            "胜率": f"{self.win_rate:.0%}",
+            "换仓次数": self.num_trades,
+        }
+
+
+def run_portfolio_backtest(
+    prices: dict[str, pd.DataFrame],
+    signals: list[Signal],
+    strategy: str,
+    initial_cash: float = 10_000.0,
+    cost_bps: float = 0.0,
+) -> PortfolioBacktestResult:
+    """组合轮动回测：同日先处理全部 sell（清仓入现金、扣卖出成本），再把现金
+    等分买入所有新增标的（扣买入成本）。一卖一买即自然换仓，资金不出场。"""
+    closes = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index().ffill()
+    if closes.empty:
+        raise ValueError("行情数据为空，无法回测")
+
+    events: dict[str, list[Signal]] = {}
+    for s in sorted(signals, key=lambda x: x.date):
+        if s.strategy == strategy and s.symbol in closes.columns:
+            events.setdefault(s.date, []).append(s)
+
+    bp = cost_bps / 1e4
+    cash = initial_cash
+    holdings: dict[str, dict] = {}   # symbol -> {shares, entry, entry_date, invested}
+    trades: list[dict] = []
+    equity_values = []
+
+    for ts in closes.index:
+        d = ts.strftime("%Y-%m-%d")
+        todays = events.get(d, [])
+        # 先卖后买：卖出所得当日即可用于买入新标的
+        for sig in todays:
+            if sig.direction != SELL or sig.symbol not in holdings:
+                continue
+            price = closes.at[ts, sig.symbol]
+            if pd.isna(price):
+                continue
+            price = float(price)
+            pos = holdings.pop(sig.symbol)
+            proceeds = pos["shares"] * price * (1 - bp)
+            cash += proceeds
+            trades.append({
+                "symbol": sig.symbol,
+                "entry_date": pos["entry_date"], "exit_date": d,
+                "entry": pos["entry"], "exit": price,
+                "pnl_pct": proceeds / pos["invested"] - 1,
+            })
+        adds = [
+            sig.symbol for sig in todays
+            if sig.direction == BUY and sig.symbol not in holdings
+            and pd.notna(closes.at[ts, sig.symbol])
+        ]
+        if adds and cash > 0:
+            per = cash / len(adds)
+            for sym in adds:
+                price = float(closes.at[ts, sym])
+                holdings[sym] = {
+                    "shares": per * (1 - bp) / price,
+                    "entry": price, "entry_date": d, "invested": per,
+                }
+            cash = 0.0
+
+        value = cash
+        for sym, pos in holdings.items():
+            price = closes.at[ts, sym]
+            if pd.notna(price):
+                value += pos["shares"] * float(price)
+        equity_values.append(value)
+
+    equity = pd.Series(equity_values, index=closes.index, name="equity")
+    wins = sum(1 for t in trades if t["pnl_pct"] > 0)
+    open_positions = [
+        {"symbol": sym, "entry_date": pos["entry_date"], "entry": pos["entry"]}
+        for sym, pos in holdings.items()
+    ]
+
+    return PortfolioBacktestResult(
+        strategy=strategy,
+        start=closes.index[0].strftime("%Y-%m-%d"),
+        end=closes.index[-1].strftime("%Y-%m-%d"),
+        win_rate=wins / len(trades) if trades else 0.0,
+        num_trades=len(trades),
+        equity=equity,
+        trades=trades,
+        open_positions=open_positions,
+        initial_cash=initial_cash,
+    )
+
+
+@dataclass
+class SmartDcaResult:
+    start: str
+    end: str
+    equity: pd.Series = field(repr=False)
+    invest_dates: list[str] = field(default_factory=list)   # 正常定投日
+    topup_dates: list[str] = field(default_factory=list)    # 金叉补投日
+    paused_spans: list[tuple[str, str]] = field(default_factory=list)  # 死叉暂停区段
+    skipped_months: int = 0
+    initial_cash: float = 10_000.0
+
+    def metrics(self) -> dict:
+        m = equity_metrics(self.equity, self.initial_cash)
+        return {
+            "总收益": f"{m['total_return']:+.1%}",
+            "年化收益": f"{m['cagr']:+.1%}",
+            "最大回撤": f"{m['max_drawdown']:.1%}",
+            "夏普比率": f"{m['sharpe']:.2f}",
+            "暂停月数": self.skipped_months,
+            "补投次数": len(self.topup_dates),
+        }
+
+
+def run_smart_dca_backtest(
+    df: pd.DataFrame,
+    fast: int = 20,
+    slow: int = 60,
+    initial_cash: float = 10_000.0,
+    cost_bps: float = 0.0,
+) -> SmartDcaResult:
+    """定投+信号开关：每月首个交易日定投一份；快线<慢线（死叉期）暂停、
+    份额累积为现金；金叉恢复当日把累积款一次性补投。均线不足时视为趋势向上。"""
+    px = price_series(df)
+    if px.empty:
+        raise ValueError("行情数据为空，无法回测")
+    fast_ma = px.rolling(fast).mean()
+    slow_ma = px.rolling(slow).mean()
+    regime = (fast_ma >= slow_ma) | slow_ma.isna()
+
+    month_firsts = set(px.groupby([px.index.year, px.index.month]).head(1).index)
+    per = initial_cash / len(month_firsts)
+    bp = cost_bps / 1e4
+
+    cash = initial_cash       # 尚未到定投日的资金池
+    pending = 0.0             # 死叉期攒下的定投款
+    shares = 0.0
+    skipped = 0
+    values, invest_dates, topup_dates, paused_spans = [], [], [], []
+    prev_r = True
+    pause_start: str | None = None
+
+    for ts, price in px.items():
+        price = float(price)
+        d = ts.strftime("%Y-%m-%d")
+        r = bool(regime[ts])
+
+        if r and not prev_r and pending > 0:   # 金叉恢复：补投累积款
+            shares += pending * (1 - bp) / price
+            pending = 0.0
+            topup_dates.append(d)
+        if ts in month_firsts:
+            cash -= per
+            if r:
+                shares += per * (1 - bp) / price
+                invest_dates.append(d)
+            else:
+                pending += per
+                skipped += 1
+
+        if not r and prev_r:
+            pause_start = d
+        elif r and not prev_r and pause_start:
+            paused_spans.append((pause_start, d))
+            pause_start = None
+        prev_r = r
+
+        values.append(cash + pending + shares * price)
+
+    if pause_start:
+        paused_spans.append((pause_start, px.index[-1].strftime("%Y-%m-%d")))
+
+    return SmartDcaResult(
+        start=px.index[0].strftime("%Y-%m-%d"),
+        end=px.index[-1].strftime("%Y-%m-%d"),
+        equity=pd.Series(values, index=px.index, name="equity"),
+        invest_dates=invest_dates,
+        topup_dates=topup_dates,
+        paused_spans=paused_spans,
+        skipped_months=skipped,
+        initial_cash=initial_cash,
     )

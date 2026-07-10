@@ -91,3 +91,55 @@ def test_momentum_rotation(rotation_prices):
 def test_momentum_needs_enough_symbols(rotation_prices):
     two = {k: rotation_prices[k] for k in ["A", "B"]}
     assert Momentum(lookback_days=20, top_n=3).generate(two) == []
+
+
+def make_df_start(closes, start="2024-01-01"):
+    closes = np.asarray(closes, dtype=float)
+    idx = pd.bdate_range(start, periods=len(closes))
+    return pd.DataFrame({
+        "open": closes, "high": closes * 1.01, "low": closes * 0.99,
+        "close": closes, "adj_close": closes, "volume": 1_000_000,
+    }, index=idx)
+
+
+def test_dual_momentum_switches_to_safe_and_back():
+    from quant.strategies.dual_momentum import DualMomentum
+    # 风险资产先涨（正动量持有）→ 暴跌（动量转负切避险）→ 反弹（切回）
+    up = list(np.linspace(100, 150, 130))
+    crash = list(np.linspace(150, 70, 65))
+    recover = list(np.linspace(70, 140, 130))
+    n = len(up + crash + recover)
+    prices = {
+        "SPY": make_df_start(up + crash + recover),
+        "QQQ": make_df_start([100.0] * n),
+        "TLT": make_df_start([100.0] * n),
+    }
+    strat = DualMomentum(lookback_days=60, risk_assets=["SPY", "QQQ"], safe_asset="TLT")
+    signals = strat.generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys[0].symbol == "SPY", "上涨期应持有最强风险资产"
+    symbols_in_order = [s.symbol for s in buys]
+    assert "TLT" in symbols_in_order, "动量转负应切换避险资产"
+    assert symbols_in_order.index("TLT") > 0
+    # 切避险后应有切回风险资产的一次
+    after_tlt = symbols_in_order[symbols_in_order.index("TLT"):]
+    assert any(sym in ("SPY", "QQQ") for sym in after_tlt[1:]), "反弹后应切回风险资产"
+    sells = [s for s in signals if s.direction == SELL]
+    assert sells, "换仓应先产生卖出信号"
+
+
+def test_smart_dca_monthly_signals_and_pause():
+    from quant.strategies.smart_dca import SmartDca
+    # 横盘（正常定投）→ 急跌（死叉沉默）→ 反弹（恢复并补投）
+    flat = [100.0] * 63
+    crash = list(np.linspace(100, 60, 42))
+    recover = list(np.linspace(60, 110, 63))
+    prices = {"SPY": make_df_start(flat + crash + recover)}
+    strat = SmartDca(symbol="SPY", fast=5, slow=20)
+    signals = strat.generate(prices)
+    assert signals and all(s.direction == BUY for s in signals)
+    assert all(s.symbol == "SPY" for s in signals)
+    # 死叉期应有月份沉默：信号数少于总月份数
+    n_months = len({(ts.year, ts.month) for ts in prices["SPY"].index})
+    assert len(signals) < n_months, "死叉期的定投日不应发信号"
+    assert any("补投" in s.reason for s in signals), "恢复后应有补投信号"

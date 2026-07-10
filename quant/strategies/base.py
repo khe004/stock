@@ -9,6 +9,14 @@ BUY = "buy"
 SELL = "sell"
 
 
+def price_series(df: pd.DataFrame) -> pd.Series:
+    """收益计算用的总回报价格序列：优先 adj_close（含分红再投资），回退 close。
+    TLT 等标的收益大头在分红，用 close 会严重低估长期回报。"""
+    if "adj_close" in df.columns and df["adj_close"].notna().any():
+        return df["adj_close"]
+    return df["close"]
+
+
 @dataclass
 class Signal:
     date: str        # YYYY-MM-DD

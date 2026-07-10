@@ -55,6 +55,10 @@ class Config:
     def email_enabled(self) -> bool:
         return bool(self.raw.get("notify", {}).get("email", False))
 
+    @property
+    def cost_bps(self) -> float:
+        return float(self.raw.get("backtest", {}).get("cost_bps", 0))
+
 
 def load_config(path: Path | None = None) -> Config:
     load_dotenv(ROOT / ".env")

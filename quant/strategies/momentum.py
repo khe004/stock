@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from quant.strategies.base import BUY, SELL, Signal, Strategy
+from quant.strategies.base import BUY, SELL, Signal, Strategy, price_series
 
 
 class Momentum(Strategy):
@@ -15,8 +15,10 @@ class Momentum(Strategy):
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         if len(prices) <= self.top_n:
             return []
+        # 排名收益用总回报口径（adj_close），信号展示价用原始收盘价
         closes = pd.DataFrame({s: df["close"] for s, df in prices.items()})
-        rets = closes.pct_change(self.lookback, fill_method=None)
+        rets = pd.DataFrame({s: price_series(df) for s, df in prices.items()}) \
+            .pct_change(self.lookback, fill_method=None)
         ranks = rets.rank(axis=1, ascending=False)
         in_top = (ranks <= self.top_n) & rets.notna()
 
