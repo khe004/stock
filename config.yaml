@@ -32,6 +32,9 @@ watchlist:
     - TLT               # 长期国债
     - GLD               # 黄金
     - IBIT              # 比特币
+  volatility:           # 波动率指数（不可交易，用于情绪/风险信号）
+    - ^VIX              # 恐慌指数
+    - ^VIX3M            # 三个月期 VIX
 
 strategies:
   sma_cross:
@@ -62,6 +65,14 @@ strategies:
     risk_assets: [SPY, QQQ]
     safe_asset: TLT
     groups: [broad, assets]
+  vix_regime:             # VIX 情绪/风险提醒：恐慌区、自满区、期限倒挂
+    enabled: true
+    vix: ^VIX
+    vix3m: ^VIX3M
+    panic: 30             # 恐慌阈值
+    complacency: 15       # 自满阈值
+    trade_symbol: SPY     # 回测时把提醒映射到该标的执行
+    groups: [volatility]
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

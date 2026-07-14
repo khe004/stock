@@ -439,6 +439,52 @@ def _render_smart_dca_bt(params: dict):
     st.plotly_chart(eq, width="stretch")
 
 
+def _render_vix_bt(params: dict):
+    from dataclasses import replace
+
+    trade_symbol = params.get("trade_symbol", "SPY")
+    vix_symbols = [params.get("vix", "^VIX"), params.get("vix3m", "^VIX3M")]
+    vix_prices = {s: store.load_prices(conn, s) for s in vix_symbols}
+    vix_prices = {s: df for s, df in vix_prices.items() if not df.empty}
+    df_trade = store.load_prices(conn, trade_symbol)
+    if df_trade.empty or params.get("vix", "^VIX") not in vix_prices:
+        st.warning("库内缺少 VIX 或交易标的行情，先运行 python run_daily.py 拉取数据")
+        return
+    window = date_window(df_trade, key="vix_regime")
+    if window is None:
+        return
+    st.caption(f"VIX 提醒本身不可交易；此处把每条提醒当作 {trade_symbol} 的买卖执行"
+               f"（sell=清仓、buy=回补），检验 VIX 择时是否创造价值。"
+               f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。")
+
+    strat = strategies.build("vix_regime", params)
+    sigs = [replace(s, symbol=trade_symbol) for s in strat.generate(vix_prices)]
+    # 起始持仓：区间开始时若无风险预警在身，视为持仓（先合成一笔买入）
+    result = run_backtest(window, sigs, trade_symbol, "vix_regime", INITIAL_CASH, cfg.cost_bps)
+    metric_cards(result.metrics())
+
+    px = price_series(window)
+    hold = hold_equity(px, INITIAL_CASH, cfg.cost_bps)
+    excess_chips(result.total_return, {
+        f"{trade_symbol}长持": float(hold.iloc[-1]) / INITIAL_CASH - 1,
+    })
+    risk_table({"VIX择时": result.equity, f"{trade_symbol}长持": hold})
+
+    eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="VIX择时"))
+    eq.add_trace(go.Scatter(x=hold.index, y=hold, mode="lines", name=f"{trade_symbol}长持",
+                            line=dict(dash="dash", color="#888")))
+    entries = [t["entry_date"] for t in result.trades]
+    if result.open_position:
+        entries.append(result.open_position["entry_date"])
+    equity_markers(eq, result.equity, entries, [t["exit_date"] for t in result.trades])
+    eq.update_layout(height=400,
+                     title=f"{trade_symbol} · VIX 择时权益曲线（{result.start} ~ {result.end}）")
+    st.plotly_chart(eq, width="stretch")
+    trades_table(result.trades)
+    st.caption("注意：首个信号之前策略持币观望，若区间开头是长牛会显著跑输长持——"
+               "重点看有恐慌事件的区间（如 2020、2022）里回撤是否更小。")
+
+
 def render_backtest():
     st.title("回测")
     strategy_name = st.selectbox("策略", strategy_names)
@@ -447,6 +493,8 @@ def render_backtest():
         _render_portfolio_bt(strategy_name, params)
     elif strategy_name == "smart_dca":
         _render_smart_dca_bt(params)
+    elif strategy_name == "vix_regime":
+        _render_vix_bt(params)
     else:
         _render_single_bt(strategy_name, params)
 
@@ -457,6 +505,8 @@ def render_strategy_docs():
     sdca = strategy_params.get("smart_dca", {"symbol": "SPY", "fast": 20, "slow": 60})
     dm = strategy_params.get("dual_momentum",
                              {"lookback_days": 252, "risk_assets": ["SPY", "QQQ"], "safe_asset": "TLT"})
+    vr = strategy_params.get("vix_regime",
+                             {"panic": 30, "complacency": 15, "trade_symbol": "SPY"})
     st.markdown(f"""
 ## 策略如何配合
 
@@ -542,6 +592,26 @@ def render_strategy_docs():
 另外它的收益大头是票息，回测必须用复权价（本平台已是）。
 
 **作用范围**：风险腿 {", ".join(dm["risk_assets"])}，避险腿 {dm["safe_asset"]}（均可在 config 修改）。
+
+---
+
+## 6. vix_regime VIX 情绪提醒（期权市场的信息浓缩）
+
+**直觉**：VIX 是标普 500 期权隐含波动率指数，反映期权市场为"保险"支付的价格。
+恐慌时保险贵（VIX 高），自满时保险便宜（VIX 低）；而 VIX 超过三个月期 VIX3M（期限倒挂）
+意味着市场对"眼前"的恐惧超过对"未来"的恐惧——历史上是可靠性较高的风险预警。
+
+**规则**（提醒信号，不直接对应交易）：
+- VIX 上穿 {vr["panic"]:.0f} → ⚠️ 进入恐慌区，控制仓位
+- VIX 回落穿 {vr["panic"]:.0f} → ✅ 恐慌消退，历史上常是分批回补窗口
+- VIX 跌破 {vr["complacency"]:.0f} → ⚠️ 自满区，防范突发回调
+- VIX ≥ VIX3M（倒挂）→ ⚠️ 风险预警；倒挂解除 → ✅ 预警撤除
+
+**何时灵**：急跌/危机前后（2020.2 倒挂先于崩盘主段出现）；给其他策略的信号做交叉验证。
+
+**何时坑**：VIX 高不代表马上跌完——恐慌区里它可以继续冲到 80；自满区可以持续数年
+（2017 全年 VIX < 15 且市场一路涨）。它是"环境判断"，不是精确择时器。
+回测页把提醒映射到 {vr["trade_symbol"]} 执行只是检验手段，实际建议当作仓位调节参考。
 
 ---
 

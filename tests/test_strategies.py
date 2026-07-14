@@ -143,3 +143,30 @@ def test_smart_dca_monthly_signals_and_pause():
     n_months = len({(ts.year, ts.month) for ts in prices["SPY"].index})
     assert len(signals) < n_months, "死叉期的定投日不应发信号"
     assert any("补投" in s.reason for s in signals), "恢复后应有补投信号"
+
+
+def test_vix_regime_signals():
+    from quant.strategies.vix_regime import VixRegime
+    # 横盘 20 → 冲高 45（上穿30恐慌 + 对 VIX3M 倒挂）→ 回落到 12（穿30回补 + 穿15自满 + 倒挂解除）
+    vix = [20.0] * 10 + list(np.linspace(20, 45, 10)) + list(np.linspace(45, 12, 15)) + [12.0] * 5
+    vix3m = [22.0] * len(vix)
+    prices = {"^VIX": make_df_start(vix), "^VIX3M": make_df_start(vix3m)}
+    signals = VixRegime(vix="^VIX", vix3m="^VIX3M", panic=30, complacency=15).generate(prices)
+    assert any(s.direction == SELL and "恐慌区" in s.reason for s in signals)
+    assert any(s.direction == BUY and "回补" in s.reason for s in signals)
+    assert any(s.direction == SELL and "倒挂" in s.reason and "解除" not in s.reason for s in signals)
+    assert any(s.direction == BUY and "倒挂解除" in s.reason for s in signals)
+    assert any("自满区" in s.reason for s in signals)
+    assert all(s.symbol == "^VIX" for s in signals)
+    dates = [s.date for s in signals]
+    assert dates == sorted(dates)
+
+
+def test_vix_regime_missing_data():
+    from quant.strategies.vix_regime import VixRegime
+    assert VixRegime().generate({}) == []
+    # 只有 VIX 没有 VIX3M：仅阈值类信号，不报错
+    vix = [20.0] * 10 + list(np.linspace(20, 45, 10))
+    signals = VixRegime().generate({"^VIX": make_df_start(vix)})
+    assert any("恐慌区" in s.reason for s in signals)
+    assert not any("倒挂" in s.reason for s in signals)
