@@ -31,8 +31,17 @@ conn = store.connect(cfg.db_path)
 strategy_params = dict(cfg.enabled_strategies())
 strategy_names = list(strategy_params)
 
-BUY_BG, SELL_BG = "#e8f5e9", "#ffebee"
-BUY_FG, SELL_FG = "#1b5e20", "#b71c1c"
+def _dark_theme() -> bool:
+    try:
+        return st.context.theme.type == "dark"
+    except Exception:   # 旧版 Streamlit 没有 st.context.theme
+        return False
+
+
+_DARK = _dark_theme()
+# 行背景用半透明色（明暗主题下都保持文字对比度）；前景色按主题选深浅
+BUY_BG, SELL_BG = "rgba(46, 125, 50, 0.25)", "rgba(198, 40, 40, 0.25)"
+BUY_FG, SELL_FG = ("#81c784", "#ef9a9a") if _DARK else ("#1b5e20", "#b71c1c")
 BUY_COLOR, SELL_COLOR = "#2ca02c", "#d62728"
 
 RANGE_OPTIONS = {"近3月": 63, "近6月": 126, "近1年": 252, "近3年": 756, "全部": None}
@@ -248,7 +257,7 @@ def risk_table(rows: dict[str, pd.Series]):
 
     def highlight(col):
         best = col.min() if col.name == "年化波动" else col.max()
-        return ["background-color: #e8f5e9; font-weight: bold" if v == best else "" for v in col]
+        return [f"background-color: {BUY_BG}; font-weight: bold" if v == best else "" for v in col]
 
     styler = (table.style.apply(highlight, axis=0)
               .format({"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
