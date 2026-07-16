@@ -24,12 +24,15 @@ class StockMomentum(Strategy):
                  regime_symbol: str = "SPY", regime_ma: int = 200,
                  safe_asset: str = "TLT",
                  universe: list[str] | None = None,
-                 sectors: dict[str, str] | None = None, **_):
+                 sectors: dict[str, str] | None = None,
+                 exclude: list[str] | None = None, **_):
         if universe is None:
             with open(ROOT / universe_file, encoding="utf-8") as f:
                 grouped = yaml.safe_load(f)
             sectors = {sym: sector for sector, syms in grouped.items() for sym in syms}
             universe = list(sectors)
+        if exclude:   # 敏感性检验：剔除指定标的（如大赢家），看超额是否依赖它们
+            universe = [s for s in universe if s not in set(exclude)]
         self.universe = universe
         self.sectors = sectors or {}
         self.pool_size = pool_size

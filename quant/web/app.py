@@ -289,11 +289,24 @@ def trades_table(trades: list[dict], with_symbol: bool = False):
     total = float(profits.sum())
     if len(profits) >= 5 and total > 0:
         k = min(10, len(profits))
-        top = float(profits.nlargest(k).sum())
-        st.caption(f"**利润集中度**：盈利最大的 {k} 笔合计 ${top:,.0f}，"
-                   f"为总净利 ${total:,.0f} 的 {top / total:.0%}"
-                   f"（可超过 100%，因为亏损单会抵消）。占比越高，收益越依赖少数几笔行情，"
-                   f"策略的可复制性越弱。")
+        top_idx = profits.nlargest(k).index
+        top = float(profits.loc[top_idx].sum())
+        text = (f"**利润集中度**：盈利最大的 {k} 笔合计 ${top:,.0f}，"
+                f"为总净利 ${total:,.0f} 的 {top / total:.0%}"
+                f"（可超过 100%，因为亏损单会抵消）。")
+        if with_symbol:
+            counts: dict[str, int] = {}
+            for i in top_idx:
+                sym = trades[i]["symbol"]
+                counts[sym] = counts.get(sym, 0) + 1
+            breakdown = "、".join(
+                f"{sym}×{n}" if n > 1 else sym
+                for sym, n in sorted(counts.items(), key=lambda kv: -kv[1]))
+            text += (f" 这 {k} 笔的标的分布：{breakdown}——"
+                     f"标的越分散说明因子越广谱，若被一两只票刷屏则收益依赖个别彩票。")
+        else:
+            text += " 占比越高，收益越依赖少数几笔行情，策略的可复制性越弱。"
+        st.caption(text)
     elif total <= 0:
         st.caption(f"区间内已平仓交易合计净亏损 ${total:,.0f}。")
 
@@ -401,6 +414,17 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     st.caption(f"组合轮动模式：资金始终在场内换仓，区间起点按区间之前的信号还原应有持仓。"
                f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。"
                f"基准为 {bench_symbol} 一次性长持（资金时间敞口一致才可比；定投基准只在智能定投模式提供）。")
+
+    if params.get("universe_file"):
+        excluded = st.multiselect(
+            "剔除标的（敏感性检验：删掉大赢家看超额是否塌掉，池子等权基准同步剔除）",
+            options=sorted(cfg.universe_symbols(params["universe_file"])),
+            default=params.get("exclude", []),
+        )
+        if excluded:
+            params = {**params, "exclude": excluded}
+            prices = {s: df for s, df in prices.items()
+                      if s not in set(excluded) or s in cfg.symbols_for(params.get("groups", []))}
 
     strat = strategies.build(strategy_name, params)
     sigs = strat.generate(prices)

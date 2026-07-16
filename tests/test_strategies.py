@@ -237,3 +237,10 @@ def test_stock_momentum_regime_off(stock_momentum_prices):
     buys = {s.symbol for s in signals if s.direction == BUY}
     assert buys == {"TLT"}, f"风险关闭时只应买入避险资产，实际 {buys}"
     assert any("风险关闭" in s.reason for s in signals)
+
+
+def test_stock_momentum_exclude(stock_momentum_prices):
+    signals = _make_sm(exclude=["AAA"]).generate(stock_momentum_prices)
+    bought = {s.symbol for s in signals if s.direction == BUY}
+    assert "AAA" not in bought, "被剔除的标的不应出现在持仓中"
+    assert "BBB" in bought, "剔除后次强者应顶上"

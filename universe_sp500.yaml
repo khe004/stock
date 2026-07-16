@@ -3,11 +3,12 @@
 # 注意：这是"今天"的成分快照，中途退市/被剔除的股票不在其中，
 # 绝对收益存在幸存者偏差；策略与"池子等权"基准共享该偏差，超额收益的比较基本干净。
 # 名单建议每半年对照最新成分手工更新一次。
+# 注意：ON/NO/YES 这类会被 YAML 解析成布尔值的代码必须加引号。
 
 信息技术:
   [AAPL, MSFT, NVDA, AVGO, ORCL, CRM, AMD, ADBE, CSCO, ACN, INTC, IBM, QCOM, TXN,
    NOW, INTU, AMAT, PANW, MU, LRCX, KLAC, SNPS, CDNS, ANET, APH, ADI, MCHP, FTNT,
-   NXPI, ON, PLTR, CRWD, SMCI, DELL, HPQ, HPE, STX, WDC, TER, SWKS, QRVO, FSLR,
+   NXPI, "ON", PLTR, CRWD, SMCI, DELL, HPQ, HPE, STX, WDC, TER, SWKS, QRVO, FSLR,
    ENPH, EPAM, GDDY, AKAM, FFIV, JNPR, NTAP, ZBRA, TYL, PTC, KEYS, IT, VRSN, GEN,
    FICO, MPWR, TDY, GLW, WDAY, DDOG, APP, TRMB, CTSH]
 
