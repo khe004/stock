@@ -61,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", help="只保留该日期(YYYY-MM-DD)的信号，默认取行情最新一天（用于补跑）")
     parser.add_argument("--no-fetch", action="store_true", help="跳过数据更新，直接用库内数据")
     parser.add_argument("--no-notify", action="store_true", help="不推送，只入库")
+    parser.add_argument("--full-refresh", action="store_true",
+                        help="全量重拉行情（修正复权价的增量拼接错位，建议每季度跑一次）")
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -70,8 +72,9 @@ def main(argv: list[str] | None = None) -> int:
     failed: list[str] = []
     if not args.no_fetch:
         symbols = cfg.update_symbols
-        log.info("更新 %d 个标的行情…", len(symbols))
-        total, failed = fetcher.update_all(conn, symbols, cfg.history_start)
+        log.info("%s %d 个标的行情…", "全量重拉" if args.full_refresh else "更新", len(symbols))
+        total, failed = fetcher.update_all(conn, symbols, cfg.history_start,
+                                           full=args.full_refresh)
         log.info("行情更新完成，共写入 %d 行，失败 %d 个", total, len(failed))
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}

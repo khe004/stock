@@ -127,6 +127,7 @@ def run_backtest(
                 "entry_date": entry_date, "exit_date": ts.strftime("%Y-%m-%d"),
                 "entry": entry_price, "exit": price,
                 "pnl_pct": cash / invested - 1,
+                "profit": cash - invested,
             })
             shares = 0.0
         equity_values.append(cash + shares * price)
@@ -224,6 +225,7 @@ def run_portfolio_backtest(
                 "entry_date": pos["entry_date"], "exit_date": d,
                 "entry": pos["entry"], "exit": price,
                 "pnl_pct": proceeds / pos["invested"] - 1,
+                "profit": proceeds - pos["invested"],
             })
         adds = [
             sig.symbol for sig in todays

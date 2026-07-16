@@ -270,17 +270,32 @@ def trades_table(trades: list[dict], with_symbol: bool = False):
     if not trades:
         return
     st.subheader("交易明细")
-    cols = (["symbol"] if with_symbol else []) + ["entry_date", "exit_date", "entry", "exit", "pnl_pct"]
-    names = (["标的"] if with_symbol else []) + ["买入日", "卖出日", "买入价", "卖出价", "收益"]
+    cols = (["symbol"] if with_symbol else []) + \
+        ["entry_date", "exit_date", "entry", "exit", "pnl_pct", "profit"]
+    names = (["标的"] if with_symbol else []) + ["买入日", "卖出日", "买入价", "卖出价", "收益", "利润($)"]
     df = pd.DataFrame(trades)[cols]
     df.columns = names
 
     def pnl_style(v):
         return f"color: {BUY_FG}" if v > 0 else f"color: {SELL_FG}"
 
-    styler = (df.style.map(pnl_style, subset=["收益"])
-              .format({"买入价": "{:.2f}", "卖出价": "{:.2f}", "收益": "{:+.2%}"}))
+    styler = (df.style.map(pnl_style, subset=["收益", "利润($)"])
+              .format({"买入价": "{:.2f}", "卖出价": "{:.2f}",
+                       "收益": "{:+.2%}", "利润($)": "{:+,.0f}"}))
     st.dataframe(styler, width="stretch", hide_index=True)
+
+    # 利润集中度：收益依赖少数几笔"彩票"的程度
+    profits = pd.Series([t["profit"] for t in trades])
+    total = float(profits.sum())
+    if len(profits) >= 5 and total > 0:
+        k = min(10, len(profits))
+        top = float(profits.nlargest(k).sum())
+        st.caption(f"**利润集中度**：盈利最大的 {k} 笔合计 ${top:,.0f}，"
+                   f"为总净利 ${total:,.0f} 的 {top / total:.0%}"
+                   f"（可超过 100%，因为亏损单会抵消）。占比越高，收益越依赖少数几笔行情，"
+                   f"策略的可复制性越弱。")
+    elif total <= 0:
+        st.caption(f"区间内已平仓交易合计净亏损 ${total:,.0f}。")
 
 
 def equity_markers(fig, equity: pd.Series, entries: list[str], exits: list[str],

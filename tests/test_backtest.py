@@ -40,6 +40,7 @@ def test_single_winning_trade():
     assert result.equity.iloc[-1] == pytest.approx(11_000)
     assert result.trades[0]["entry_date"] == d[0]
     assert result.trades[0]["exit_date"] == d[10]
+    assert result.trades[0]["profit"] == pytest.approx(1_000)
     assert result.open_position is None
 
 
@@ -139,6 +140,7 @@ def test_portfolio_swap_sell_funds_same_day_buy():
     assert result.equity.iloc[-1] == pytest.approx(20_000)
     assert result.num_trades == 1
     assert result.trades[0]["symbol"] == "A"
+    assert result.trades[0]["profit"] == pytest.approx(0.0)
     assert result.open_positions[0]["symbol"] == "B"
 
 
