@@ -170,3 +170,70 @@ def test_vix_regime_missing_data():
     signals = VixRegime().generate({"^VIX": make_df_start(vix)})
     assert any("恐慌区" in s.reason for s in signals)
     assert not any("倒挂" in s.reason for s in signals)
+
+
+@pytest.fixture
+def stock_momentum_prices():
+    n = 260
+    def vol_df(closes, volume):
+        closes = np.asarray(closes, dtype=float)
+        idx = pd.bdate_range("2023-01-02", periods=len(closes))
+        return pd.DataFrame({
+            "open": closes, "high": closes * 1.01, "low": closes * 0.99,
+            "close": closes, "adj_close": closes, "volume": float(volume),
+        }, index=idx)
+    return {
+        "AAA": vol_df(100 * 1.004 ** np.arange(n), 5_000_000),   # 最强动量、高流动性
+        "BBB": vol_df(100 * 1.002 ** np.arange(n), 5_000_000),   # 次强、高流动性
+        "CCC": vol_df(np.full(n, 100.0), 5_000_000),             # 横盘、高流动性
+        "DDD": vol_df(np.full(n, 100.0), 5_000_000),
+        "EEE": vol_df(100 * 1.01 ** np.arange(n), 1_000),        # 动量最强但极不流动
+        "SPY": vol_df(100 * 1.003 ** np.arange(n), 9_000_000),
+        "TLT": vol_df(np.full(n, 100.0), 9_000_000),
+    }
+
+
+def _make_sm(**kw):
+    from quant.strategies.stock_momentum import StockMomentum
+    base = dict(
+        universe=["AAA", "BBB", "CCC", "DDD", "EEE"],
+        sectors={"AAA": "科技", "BBB": "科技", "CCC": "能源", "DDD": "金融", "EEE": "科技"},
+        pool_size=4, liquidity_window=5, lookback_days=60, skip_days=5,
+        top_n=2, max_per_sector=2, regime_symbol="SPY", regime_ma=20, safe_asset="TLT",
+    )
+    base.update(kw)
+    return StockMomentum(**base)
+
+
+def test_stock_momentum_picks_liquid_winners(stock_momentum_prices):
+    signals = _make_sm().generate(stock_momentum_prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "应有买入信号"
+    bought = {s.symbol for s in buys}
+    assert "AAA" in bought and "BBB" in bought, "应选中流动性池内动量最强的两只"
+    assert "EEE" not in bought, "动量最强但不流动的股票应被池子排除"
+    assert any("流动性池内第 1 名" in s.reason for s in buys)
+
+
+def test_stock_momentum_sector_cap(stock_momentum_prices):
+    signals = _make_sm(max_per_sector=1).generate(stock_momentum_prices)
+    # AAA/BBB 同为科技，限 1 只后第二席位应让给其他行业
+    held_first = {s.symbol for s in signals if s.direction == BUY}
+    assert "AAA" in held_first
+    assert "BBB" not in held_first, "单行业上限应把同行业第二名挤出"
+
+
+def test_stock_momentum_regime_off(stock_momentum_prices):
+    # SPY 全程下跌 → 跌破均线后风险关闭，只应持有 TLT
+    prices = dict(stock_momentum_prices)
+    n = 260
+    closes = 100 * 0.998 ** np.arange(n)
+    idx = pd.bdate_range("2023-01-02", periods=n)
+    prices["SPY"] = pd.DataFrame({
+        "open": closes, "high": closes * 1.01, "low": closes * 0.99,
+        "close": closes, "adj_close": closes, "volume": 9_000_000.0,
+    }, index=idx)
+    signals = _make_sm().generate(prices)
+    buys = {s.symbol for s in signals if s.direction == BUY}
+    assert buys == {"TLT"}, f"风险关闭时只应买入避险资产，实际 {buys}"
+    assert any("风险关闭" in s.reason for s in signals)

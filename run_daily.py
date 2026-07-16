@@ -69,11 +69,12 @@ def main(argv: list[str] | None = None) -> int:
 
     failed: list[str] = []
     if not args.no_fetch:
-        log.info("更新 %d 个标的行情…", len(cfg.all_symbols))
-        total, failed = fetcher.update_all(conn, cfg.all_symbols, cfg.history_start)
+        symbols = cfg.update_symbols
+        log.info("更新 %d 个标的行情…", len(symbols))
+        total, failed = fetcher.update_all(conn, symbols, cfg.history_start)
         log.info("行情更新完成，共写入 %d 行，失败 %d 个", total, len(failed))
 
-    prices = {s: store.load_prices(conn, s) for s in cfg.all_symbols}
+    prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}
     if not prices:
         log.error("库内没有任何行情数据，退出")
@@ -86,6 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     for name, params in cfg.enabled_strategies():
         strat = strategies.build(name, params)
         group_symbols = cfg.symbols_for(params.get("groups", []))
+        if params.get("universe_file"):
+            group_symbols += [s for s in cfg.universe_symbols(params["universe_file"])
+                              if s not in group_symbols]
         group_prices = {s: prices[s] for s in group_symbols if s in prices}
         sigs = [s for s in strat.generate(group_prices) if s.date == as_of]
         log.info("%s: %d 条当日信号", name, len(sigs))
@@ -105,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             log.info("今日无新信号")
         if failed:
-            dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {', '.join(failed)}，信号可能不完整")
+            shown = ", ".join(failed[:20]) + (f" 等 {len(failed)} 个" if len(failed) > 20 else "")
+            dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {shown}，信号可能不完整")
 
     return 0
 

@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class Config:
     def __init__(self, raw: dict):
         self.raw = raw
+        self._universe_cache: dict[str, list[str]] = {}
 
     @property
     def db_path(self) -> Path:
@@ -58,6 +59,28 @@ class Config:
     @property
     def cost_bps(self) -> float:
         return float(self.raw.get("backtest", {}).get("cost_bps", 0))
+
+    def universe_symbols(self, filename: str) -> list[str]:
+        """读取按行业分组的候选超集文件，返回全部代码（去重保序）。"""
+        if filename not in self._universe_cache:
+            with open(ROOT / filename, encoding="utf-8") as f:
+                grouped = yaml.safe_load(f)
+            seen: dict[str, None] = {}
+            for syms in grouped.values():
+                for s in syms:
+                    seen.setdefault(s)
+            self._universe_cache[filename] = list(seen)
+        return self._universe_cache[filename]
+
+    @property
+    def update_symbols(self) -> list[str]:
+        """每日需要更新行情的全部代码：watchlist + 各策略的候选超集。"""
+        seen: dict[str, None] = dict.fromkeys(self.all_symbols)
+        for _, params in self.enabled_strategies():
+            if params.get("universe_file"):
+                for s in self.universe_symbols(params["universe_file"]):
+                    seen.setdefault(s)
+        return list(seen)
 
 
 def load_config(path: Path | None = None) -> Config:

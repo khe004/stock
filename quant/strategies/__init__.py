@@ -4,11 +4,13 @@ from quant.strategies.momentum import Momentum
 from quant.strategies.rsi_reversal import RsiReversal
 from quant.strategies.sma_cross import SmaCross
 from quant.strategies.smart_dca import SmartDca
+from quant.strategies.stock_momentum import StockMomentum
 from quant.strategies.vix_regime import VixRegime
 
 REGISTRY: dict[str, type[Strategy]] = {
     cls.name: cls
-    for cls in (SmaCross, Momentum, RsiReversal, SmartDca, DualMomentum, VixRegime)
+    for cls in (SmaCross, Momentum, RsiReversal, SmartDca, DualMomentum,
+                VixRegime, StockMomentum)
 }
 
 

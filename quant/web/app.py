@@ -206,7 +206,7 @@ def render_momentum_rank():
     st.plotly_chart(rfig, width="stretch")
 
 
-PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum"}
+PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum"}
 INITIAL_CASH = 10_000.0
 
 RISK_COLS = {
@@ -332,8 +332,37 @@ def _render_single_bt(strategy_name: str, params: dict):
         st.caption(f"区间末仍持仓：{result.open_position['entry_date']} 以 ${result.open_position['entry']:.2f} 买入，未平仓部分按区间末市值计入指标。")
 
 
+def pool_equal_weight_equity(prices: dict[str, pd.DataFrame],
+                             pools: dict[pd.Timestamp, list[str]],
+                             initial_cash: float) -> pd.Series | None:
+    """池子等权基准：每月重建的流动性池内等权持有（月度再平衡，不计成本）。
+    与策略共享同一候选超集，幸存者偏差在对比中近似抵消。"""
+    if not pools:
+        return None
+    adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
+    rets = adj.pct_change(fill_method=None)
+    pool_dates = sorted(pools)
+    current: list[str] = []
+    i = 0
+    values = []
+    for ts in rets.index:
+        while i < len(pool_dates) and pool_dates[i] <= ts:
+            current = [s for s in pools[pool_dates[i]] if s in rets.columns]
+            i += 1
+        if current:
+            r = rets.loc[ts, current].dropna()
+            values.append(float(r.mean()) if not r.empty else 0.0)
+        else:
+            values.append(0.0)
+    equity = initial_cash * (1 + pd.Series(values, index=rets.index)).cumprod()
+    return equity.rename("pool_ew")
+
+
 def _render_portfolio_bt(strategy_name: str, params: dict):
     universe = cfg.symbols_for(params.get("groups", []))
+    if params.get("universe_file"):
+        universe += [s for s in cfg.universe_symbols(params["universe_file"])
+                     if s not in universe]
     prices = {s: store.load_prices(conn, s) for s in universe}
     prices = {s: df for s, df in prices.items() if not df.empty}
     if not prices:
@@ -373,14 +402,29 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     px = price_series(bench_window)
     hold = hold_equity(px, INITIAL_CASH, cfg.cost_bps)
     strategy_total = equity_metrics(result.equity, INITIAL_CASH)["total_return"]
+
+    benchmarks: dict[str, pd.Series] = {f"{bench_symbol}长持": hold}
+    if strategy_name == "stock_momentum":
+        # 池子等权：与策略共享同一候选超集，是判断"排名有没有加信息"的最干净对照
+        pools = strat.monthly_pools(
+            {s: df.loc[start_str:end_str] for s, df in prices.items() if not df.loc[start_str:end_str].empty})
+        pool_ew = pool_equal_weight_equity(window_prices, pools, INITIAL_CASH)
+        if pool_ew is not None:
+            benchmarks["池子等权"] = pool_ew
+        if "QQQ" in prices:
+            qqq = prices["QQQ"].loc[start_str:end_str]
+            if not qqq.empty:
+                benchmarks["QQQ长持"] = hold_equity(price_series(qqq), INITIAL_CASH, cfg.cost_bps)
+
     excess_chips(strategy_total, {
-        f"{bench_symbol}长持": float(hold.iloc[-1]) / INITIAL_CASH - 1,
+        name: float(eq_.iloc[-1]) / INITIAL_CASH - 1 for name, eq_ in benchmarks.items()
     })
-    risk_table({"策略组合": result.equity, f"{bench_symbol}长持": hold})
+    risk_table({"策略组合": result.equity, **benchmarks})
 
     eq = go.Figure(go.Scatter(x=result.equity.index, y=result.equity, mode="lines", name="策略组合"))
-    eq.add_trace(go.Scatter(x=hold.index, y=hold, mode="lines", name=f"{bench_symbol}长持",
-                            line=dict(dash="dash", color="#888")))
+    for i, (name, series) in enumerate(benchmarks.items()):
+        eq.add_trace(go.Scatter(x=series.index, y=series, mode="lines", name=name,
+                                line=dict(dash=("dash", "dot", "dashdot")[i % 3], color=("#888", "#bc8f5f", "#6a9fb5")[i % 3])))
     entries = [t["entry_date"] for t in result.trades] + [p["entry_date"] for p in result.open_positions]
     entry_texts = [t["symbol"] for t in result.trades] + [p["symbol"] for p in result.open_positions]
     equity_markers(eq, result.equity, entries, [t["exit_date"] for t in result.trades],
@@ -507,6 +551,11 @@ def render_strategy_docs():
                              {"lookback_days": 252, "risk_assets": ["SPY", "QQQ"], "safe_asset": "TLT"})
     vr = strategy_params.get("vix_regime",
                              {"panic": 30, "complacency": 15, "trade_symbol": "SPY"})
+    sm = strategy_params.get("stock_momentum", {
+        "universe_file": "universe_sp500.yaml", "pool_size": 100, "liquidity_window": 20,
+        "lookback_days": 252, "skip_days": 21, "top_n": 6, "max_per_sector": 2,
+        "regime_symbol": "SPY", "regime_ma": 200, "safe_asset": "TLT",
+    })
     st.markdown(f"""
 ## 策略如何配合
 
@@ -612,6 +661,31 @@ def render_strategy_docs():
 **何时坑**：VIX 高不代表马上跌完——恐慌区里它可以继续冲到 80；自满区可以持续数年
 （2017 全年 VIX < 15 且市场一路涨）。它是"环境判断"，不是精确择时器。
 回测页把提醒映射到 {vr["trade_symbol"]} 执行只是检验手段，实际建议当作仓位调节参考。
+
+---
+
+## 7. stock_momentum 个股横截面动量（选股版动量轮动）
+
+**直觉**：指数按市值加权——市值是"过去涨出来的结果"；动量按近期强弱加权——押"强者恒强"。
+横截面动量（Jegadeesh & Titman 1993）是实证金融里被验证最充分的异象之一。
+
+**规则**：每月首个交易日三步走——
+1. **动态池**：候选超集（{sm["universe_file"]}，约 500 只）按近 {sm["liquidity_window"]} 日平均成交额取前 {sm["pool_size"]} 名。
+   池子只用当时的数据重建（point-in-time），新贵在变得足够大、足够流动时被规则自动接纳；
+2. **选股**：池内按 12-1 动量（近 {sm["lookback_days"]} 日收益、跳过最近 {sm["skip_days"]} 日避开短期反转）
+   排名，取前 {sm["top_n"]} 只，单行业最多 {sm["max_per_sector"]} 只；
+3. **风控**：{sm["regime_symbol"]} 跌破 {sm["regime_ma"]} 日均线 → 全部清仓切 {sm["safe_asset"]}，防动量崩溃。
+
+**何时灵**：趋势分明、板块轮动清晰的行情；能在主升浪早中段抓住 NVDA 式的大动量股。
+
+**何时坑**：三个都要记住。
+一是**幸存者偏差**：候选超集是今天的成分快照，中途退市的输家缺席，**绝对收益虚高**
+（量级约每年 1-2 个点）——所以回测页给了"池子等权"基准，它与策略共享同一偏差，
+**跑赢池子等权才说明动量排名真的加了信息**，这是本策略回测唯一该信的对比；
+二是**动量崩溃**：V 型反转月纯动量能亏 20-30%，regime 过滤只能缓解不能免疫；
+三是**个股波动**：{sm["top_n"]} 只集中持仓的回撤和波动显著高于指数，看 Calmar 别只看总收益。
+
+**作用范围**：动态流动性池（候选超集见 `{sm["universe_file"]}`，建议每半年手工更新）。
 
 ---
 
