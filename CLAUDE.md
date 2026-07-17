@@ -58,6 +58,10 @@ dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 
 - **别用 `pkill -f "streamlit"`**——模式会匹配到自己的 bash 把 shell 杀掉（exit 144）。
   换端口另起即可。
 - YAML 名单里 `ON`/`NO` 类代码必须加引号（否则解析成布尔值）。
+- **.gitignore 模式必须根锚定**（`/data/` 而非 `data/`）——曾因 `data/` 误匹配
+  `quant/data/` 代码目录导致其从未被提交，容器一切正常而用户 clone 后缺文件。
+  提交前用 `git ls-files --others --exclude-standard` 查漏网文件。
+- 用户 Mac 是自带 bash 3.2：shell 脚本里变量一律 `${VAR}`，别让全角字符紧贴变量。
 
 ## 工作流约定
 
