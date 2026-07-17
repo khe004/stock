@@ -2,8 +2,6 @@
 
 import logging
 import time
-from datetime import date, timedelta
-
 import pandas as pd
 import yfinance as yf
 
@@ -55,19 +53,17 @@ def update_symbol(conn, symbol: str, history_start: str, full: bool = False) -> 
 
     full=True 时忽略库内进度、从 history_start 全量重拉并覆盖：yfinance 的
     adj_close 以下载日为基准回溯复权，分红后历史行会整体变化，增量拼接会在
-    衔接点留下微小错位，建议每季度全量刷新一次。"""
+    衔接点留下微小错位，建议每季度全量刷新一次。
+
+    增量起点是库内最新日期"本身"而非其后一天：盘中运行会存下当日的半根K线，
+    从最新日期重拉可保证下次运行将其覆盖为收盘定稿（REPLACE 幂等）。"""
     latest = None if full else store.latest_price_date(conn, symbol)
-    if latest:
-        start = (date.fromisoformat(latest) + timedelta(days=1)).isoformat()
-        if start > date.today().isoformat():
-            return 0
-    else:
-        start = history_start
+    start = latest if latest else history_start
     df = fetch_history(symbol, start)
     if df.empty:
         if latest is None:
-            # yfinance 拉取失败时常静默返回空表；首次拉取拿到空必属异常
-            raise RuntimeError(f"{symbol}: 首次拉取返回空数据（网络受限或代码无效？）")
+            # yfinance 拉取失败时常静默返回空表；首拉/全量拿到空必属异常
+            raise RuntimeError(f"{symbol}: 拉取返回空数据（网络受限或代码无效？）")
         return 0
     return store.upsert_prices(conn, symbol, df)
 
