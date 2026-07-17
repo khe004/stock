@@ -63,6 +63,7 @@ python run_daily.py --date 2026-07-03   # 补跑某天的信号
 python run_daily.py --no-fetch     # 跳过数据更新（离线调试）
 python run_daily.py --no-notify    # 只入库不推送
 python run_daily.py --full-refresh # 全量重拉行情（复权价随分红回溯变化，建议每季度跑一次）
+python run_daily.py --backfill      # 把各策略全量历史信号补入库（标记已通知不推送），初始化信号历史
 
 streamlit run quant/web/app.py     # 打开复盘面板
 python -m pytest tests/            # 跑单元测试

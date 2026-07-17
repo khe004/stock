@@ -63,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-notify", action="store_true", help="不推送，只入库")
     parser.add_argument("--full-refresh", action="store_true",
                         help="全量重拉行情（修正复权价的增量拼接错位，建议每季度跑一次）")
+    parser.add_argument("--backfill", action="store_true",
+                        help="把各策略全量历史信号一次性补入库（标记为已通知，不推送），"
+                             "用于初始化或找回信号历史")
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -84,7 +87,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     as_of = args.date or max(df.index.max() for df in prices.values()).strftime("%Y-%m-%d")
-    log.info("信号日期: %s", as_of)
+    log.info("信号日期: %s%s", as_of, "（backfill：补全量历史信号）" if args.backfill else "")
 
     all_new: list = []
     for name, params in cfg.enabled_strategies():
@@ -94,12 +97,19 @@ def main(argv: list[str] | None = None) -> int:
             group_symbols += [s for s in cfg.universe_symbols(params["universe_file"])
                               if s not in group_symbols]
         group_prices = {s: prices[s] for s in group_symbols if s in prices}
-        sigs = [s for s in strat.generate(group_prices) if s.date == as_of]
-        log.info("%s: %d 条当日信号", name, len(sigs))
+        sigs = strat.generate(group_prices)
+        if not args.backfill:
+            sigs = [s for s in sigs if s.date == as_of]
+        log.info("%s: %d 条%s信号", name, len(sigs), "历史" if args.backfill else "当日")
         all_new.extend(sigs)
 
     inserted = store.insert_signals(conn, all_new)
     log.info("新入库信号 %d 条（重复 %d 条已忽略）", inserted, len(all_new) - inserted)
+
+    if args.backfill:
+        marked = store.mark_all_notified(conn)
+        log.info("backfill 完成：%d 条历史信号已标记为已通知（不推送）", marked)
+        return 0
 
     if not args.no_notify:
         pending = store.unnotified_signals(conn)

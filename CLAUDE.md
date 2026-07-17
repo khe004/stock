@@ -10,6 +10,7 @@ python -m pytest tests/ -q                # 单测（全绿是提交底线）
 python run_daily.py --no-fetch --no-notify  # 离线跑流水线（容器内用这个）
 python run_daily.py --date 2026-07-03     # 补跑某日信号（幂等）
 python run_daily.py --full-refresh        # 全量重拉行情（复权价拼接错位，季度一次）
+python run_daily.py --backfill             # 补全量历史信号入库（标记已通知不推送）
 streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K线/动量排名/策略评分/回测/策略说明）
 ```
 
@@ -41,7 +42,9 @@ dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 
 4. **幸存者偏差**：`universe_sp500.yaml` 是今天的成分快照，绝对收益虚高；选股池按当时
    成交额逐月重建（point-in-time）缓解前视。回测页有剔除标的多选框做敏感性检验。
 5. **幂等**：signals 表 (date,symbol,strategy,direction) 唯一；未配置通知渠道=打印即视为
-   已送达；渠道失败才留待重试。
+   已送达；渠道失败才留待重试。**run_daily 默认只入库当天信号**（`s.date == as_of`），
+   所以「信号历史」页只累积平台实际运行过且当天有信号的记录——初始化或找回历史用
+   `--backfill`（全量历史信号入库并标记已通知，不倒灌推送）。
 6. **信号 reason 必须是人话**（含数值与理由），推送和面板直接展示。
 7. **watchlist 的 `macro` 组是纯展示**（大盘指数/美元/黄金/原油/比特币/十年期与三月期美债
    收益率），不喂给任何策略，只供市场概览页的瓷砖和情绪红绿灯用。

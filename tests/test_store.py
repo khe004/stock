@@ -87,3 +87,14 @@ def test_migrate_legacy_db(tmp_path):
     # 再次 connect 幂等，不再触发迁移
     conn2 = store.connect(db)
     assert len(store.unnotified_signals(conn2)) == 1
+
+
+def test_mark_all_notified():
+    conn = make_conn()
+    store.insert_signals(conn, [sig(), sig(symbol="QQQ"), sig(symbol="IWM")])
+    assert len(store.unnotified_signals(conn)) == 3
+    marked = store.mark_all_notified(conn)
+    assert marked == 3
+    assert store.unnotified_signals(conn) == []
+    # 幂等：再次调用无未通知信号可标
+    assert store.mark_all_notified(conn) == 0

@@ -139,6 +139,16 @@ def unnotified_signals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def mark_all_notified(conn: sqlite3.Connection) -> int:
+    """把所有未通知信号标记为已通知（backfill 用：历史信号只补记录不推送）。"""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cur = conn.execute(
+        "UPDATE signals SET notified_at = ? WHERE notified_at IS NULL", (now,)
+    )
+    conn.commit()
+    return cur.rowcount
+
+
 def mark_notified(conn: sqlite3.Connection, ids: list[int]) -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn.executemany("UPDATE signals SET notified_at = ? WHERE id = ?", [(now, i) for i in ids])
