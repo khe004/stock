@@ -6,7 +6,9 @@
 # 注意：ON/NO/YES 这类会被 YAML 解析成布尔值的代码必须加引号。
 # 2026-07 清理（并购/私有化退市）：JNPR(HPE收购)、IPG(Omnicom收购)、
 # PARA(Skydance合并)、WBA(私有化)、K(Mars收购)、HOLX(私有化)、
-# DFS(Capital One收购)、DAY(Thoma Bravo私有化)、HES(Chevron收购)。
+# DFS(Capital One收购)、DAY(Thoma Bravo私有化)、HES(Chevron收购)、
+# CTRA(2026-05 并入 Devon，存续代码 DVN 已在名单)。
+# 2026 年改代码：MMC→MRSH(2026-01)、FI→FISV(2026)、BK→BNY(2026-05)。
 
 信息技术:
   [AAPL, MSFT, NVDA, AVGO, ORCL, CRM, AMD, ADBE, CSCO, ACN, INTC, IBM, QCOM, TXN,
@@ -38,9 +40,9 @@
    ZBH, SOLV, HSIC]
 
 金融:
-  [BRK-B, JPM, V, MA, BAC, WFC, GS, MS, SPGI, AXP, BLK, C, SCHW, MMC, CB, PGR,
-   ICE, CME, PNC, AON, USB, COF, TFC, BK, TRV, AFL, MET, AIG, PRU, ALL, MCO,
-   AJG, MSCI, FIS, FI, GPN, PYPL, KKR, BX, APO, SYF, FITB, HBAN, RF, KEY,
+  [BRK-B, JPM, V, MA, BAC, WFC, GS, MS, SPGI, AXP, BLK, C, SCHW, MRSH, CB, PGR,
+   ICE, CME, PNC, AON, USB, COF, TFC, BNY, TRV, AFL, MET, AIG, PRU, ALL, MCO,
+   AJG, MSCI, FIS, FISV, GPN, PYPL, KKR, BX, APO, SYF, FITB, HBAN, RF, KEY,
    CFG, MTB, NTRS, STT, WRB, CINF, FDS, CBOE, NDAQ, MKTX, IVZ, BEN, TROW, L,
    GL, AIZ, EG, ERIE, HIG, PFG, COIN, CPAY, JKHY, BRO, RJF, WTW]
 
@@ -53,7 +55,7 @@
 
 能源:
   [XOM, CVX, COP, EOG, SLB, PSX, MPC, VLO, OXY, WMB, OKE, KMI, DVN, HAL,
-   BKR, FANG, CTRA, APA, EQT, TRGP, TPL]
+   BKR, FANG, APA, EQT, TRGP, TPL]
 
 材料:
   [LIN, SHW, APD, ECL, FCX, NEM, NUE, DOW, DD, PPG, LYB, MLM, VMC, IFF, ALB,
