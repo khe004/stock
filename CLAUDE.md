@@ -10,7 +10,7 @@ python -m pytest tests/ -q                # 单测（全绿是提交底线）
 python run_daily.py --no-fetch --no-notify  # 离线跑流水线（容器内用这个）
 python run_daily.py --date 2026-07-03     # 补跑某日信号（幂等）
 python run_daily.py --full-refresh        # 全量重拉行情（复权价拼接错位，季度一次）
-streamlit run quant/web/app.py            # 面板（信号历史/K线/动量排名/回测/策略说明）
+streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K线/动量排名/策略评分/回测/策略说明）
 ```
 
 ## 架构速览
@@ -21,7 +21,10 @@ streamlit run quant/web/app.py            # 面板（信号历史/K线/动量排
 - `quant/strategies/`：基类 `generate(prices: dict[symbol, df]) -> list[Signal]`，对**全量历史**出信号；
   每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY
 - `quant/backtest/engine.py`：单标的、组合轮动（同日先卖后买、资金不出场）、智能定投三种模拟
-- `quant/web/app.py`：五页面板；回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
+- `quant/analysis/`：market.py（52周区间位置/行业宽度/收益率利差，纯计算给市场概览页用）、
+  scoring.py（signal_forward_returns 逐信号算 5/20/60 日前瞻收益，给策略评分页用）
+- `quant/web/app.py`：七页面板（市场概览/信号历史/K线/动量排名/策略评分/回测/策略说明）；
+  回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
 
 七个策略：sma_cross、momentum（行业轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
 dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）。
@@ -40,11 +43,15 @@ dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 
 5. **幂等**：signals 表 (date,symbol,strategy,direction) 唯一；未配置通知渠道=打印即视为
    已送达；渠道失败才留待重试。
 6. **信号 reason 必须是人话**（含数值与理由），推送和面板直接展示。
+7. **watchlist 的 `macro` 组是纯展示**（大盘指数/美元/黄金/原油/比特币/十年期与三月期美债
+   收益率），不喂给任何策略，只供市场概览页的瓷砖和情绪红绿灯用。
+8. **策略评分 ≠ 回测**：评分页用 `signal_forward_returns` 只看单条信号发出后 N 日涨跌
+   （不含仓位/成本），回测是机械执行整套策略的资金曲线模拟——两者故意不同，互为补充。
 
 ## 容器环境（Claude Code 云端）注意
 
 - **代理不通 Yahoo/行情站点**，真实数据拉不了。验证用合成数据：scratchpad 有 seed 脚本
-  灌 prices 表（21 只 ETF + ^VIX/^VIX3M + 60 只个股），然后 `--no-fetch` 跑。
+  灌 prices 表（21 只 ETF + ^VIX/^VIX3M + 60 只个股 + 10 个 macro 指数/资产），然后 `--no-fetch` 跑。
 - 面板验证：`streamlit.testing.v1.AppTest` 逐页/逐策略跑；截图用 Playwright
   （executablePath=/opt/pw-browsers/chromium，selectbox 用 `[data-testid="stSelectbox"]`，
   暗色主题 `--theme.base dark` + `color_scheme='dark'`）。

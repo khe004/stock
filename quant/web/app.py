@@ -11,6 +11,8 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from quant import strategies
+from quant.analysis.market import range_position, sector_breadth, yield_curve_spread
+from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.backtest.engine import (
     dca_equity,
     equity_metrics,
@@ -43,6 +45,13 @@ _DARK = _dark_theme()
 BUY_BG, SELL_BG = "rgba(46, 125, 50, 0.25)", "rgba(198, 40, 40, 0.25)"
 BUY_FG, SELL_FG = ("#81c784", "#ef9a9a") if _DARK else ("#1b5e20", "#b71c1c")
 BUY_COLOR, SELL_COLOR = "#2ca02c", "#d62728"
+
+
+def signed_color(v) -> str:
+    """正数用买入色、负数用卖出色，供 pandas Styler 的 map 使用。"""
+    if pd.isna(v):
+        return ""
+    return f"color: {BUY_FG}" if v > 0 else (f"color: {SELL_FG}" if v < 0 else "")
 
 RANGE_OPTIONS = {"近3月": 63, "近6月": 126, "近1年": 252, "近3年": 756, "全部": None}
 
@@ -79,6 +88,109 @@ def group_closes(group_key: str, adjusted: bool = False) -> pd.DataFrame:
         if not df.empty:
             frames[s] = price_series(df) if adjusted else df["close"]
     return pd.DataFrame(frames)
+
+
+MACRO_NAMES = {
+    "^GSPC": "标普500", "^IXIC": "纳斯达克综合", "^DJI": "道琼斯工业", "^RUT": "罗素2000",
+    "^VIX": "VIX恐慌指数", "^TNX": "10年期美债收益率",
+    "DX-Y.NYB": "美元指数", "GC=F": "黄金期货", "CL=F": "原油WTI", "BTC-USD": "比特币",
+    "TLT": "TLT长债", "QQQ": "QQQ纳指100",
+}
+MACRO_ROW1 = ["^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX", "^TNX"]
+MACRO_ROW2 = ["DX-Y.NYB", "GC=F", "CL=F", "BTC-USD", "TLT", "QQQ"]
+
+
+def _macro_tile(col, symbol: str, df: pd.DataFrame | None):
+    name = MACRO_NAMES.get(symbol, symbol)
+    with col.container(border=True):
+        if df is None or df.empty or len(df) < 2:
+            st.metric(name, "无数据")
+            return
+        close = df["close"]
+        last, prev = float(close.iloc[-1]), float(close.iloc[-2])
+        chg = last / prev - 1
+        is_yield = symbol in ("^TNX", "^IRX")
+        st.metric(name, f"{last:,.2f}{'%' if is_yield else ''}", f"{chg:+.2%}")
+        pos = range_position(close)
+        if pos is not None:
+            st.progress(min(1.0, max(0.0, pos)), text=f"52周区间 {pos:.0%}")
+
+
+def render_market_overview():
+    st.title("市场概览")
+    symbols = list(dict.fromkeys(MACRO_ROW1 + MACRO_ROW2))  # TLT/QQQ 已在 broad/assets 组，一并加载
+    prices = {s: store.load_prices(conn, s) for s in symbols}
+    if all(df.empty for df in prices.values()):
+        st.warning("库内没有宏观行情，先运行 python run_daily.py 拉取数据")
+        return
+
+    for row in (MACRO_ROW1, MACRO_ROW2):
+        cols = st.columns(len(row))
+        for col, sym in zip(cols, row):
+            _macro_tile(col, sym, prices.get(sym))
+
+    st.subheader("市场情绪")
+    spy = store.load_prices(conn, "SPY")
+    vix = prices.get("^VIX")
+    vix3m = store.load_prices(conn, "^VIX3M")
+    irx = store.load_prices(conn, "^IRX")
+    sector_closes = {s: df["close"] for s, df in
+                     ((s, store.load_prices(conn, s)) for s in cfg.watchlist.get("sectors", []))
+                     if not df.empty}
+
+    lights = []
+
+    if not spy.empty and len(spy) >= 200:
+        close = price_series(spy)
+        ma200 = float(close.rolling(200).mean().iloc[-1])
+        dev = float(close.iloc[-1]) / ma200 - 1
+        ok = dev >= 0
+        lights.append(("大盘趋势", "🟢" if ok else "🔴",
+                       f"SPY {'高于' if ok else '低于'} 200日均线 {abs(dev):.1%}"))
+    else:
+        lights.append(("大盘趋势", "⚪", "数据不足"))
+
+    if vix is not None and not vix.empty:
+        v = float(vix["close"].iloc[-1])
+        if v >= 30:
+            icon, label = "🔴", "恐慌"
+        elif v <= 15:
+            icon, label = "🟡", "自满"
+        else:
+            icon, label = "🟢", "中性"
+        note = ""
+        if vix3m is not None and not vix3m.empty:
+            spread = yield_curve_spread(vix["close"], vix3m["close"])
+            if spread is not None and spread >= 0:
+                note = "，期限结构倒挂"
+        lights.append(("恐慌温度", icon, f"VIX {v:.1f}（{label}）{note}"))
+    else:
+        lights.append(("恐慌温度", "⚪", "数据不足"))
+
+    breadth = sector_breadth(sector_closes)
+    if breadth["total"] > 0:
+        icon = "🟢" if breadth["above"] >= 8 else ("🟡" if breadth["above"] >= 4 else "🔴")
+        lights.append(("行业宽度", icon,
+                       f"{breadth['above']}/{breadth['total']} 只行业ETF站上200日均线"))
+    else:
+        lights.append(("行业宽度", "⚪", "数据不足"))
+
+    tnx = prices.get("^TNX")
+    if tnx is not None and not tnx.empty and not irx.empty:
+        spread = yield_curve_spread(tnx["close"], irx["close"])
+        icon = "🔴" if spread is not None and spread < 0 else "🟢"
+        lights.append(("收益率曲线", icon,
+                       f"10年-3月利差 {spread:+.2f}pp" if spread is not None else "数据不足"))
+    else:
+        lights.append(("收益率曲线", "⚪", "数据不足"))
+
+    cols = st.columns(4)
+    for col, (name, icon, detail) in zip(cols, lights):
+        with col.container(border=True):
+            st.markdown(f"##### {icon} {name}")
+            st.caption(detail)
+    st.caption("情绪红绿灯仅作环境参考，不直接构成交易信号；具体规则见「策略说明」页 vix_regime 与 "
+               "stock_momentum 章节。")
 
 
 def render_signal_history():
@@ -215,6 +327,94 @@ def render_momentum_rank():
     st.plotly_chart(rfig, width="stretch")
 
 
+def _all_strategy_signals() -> tuple[list[Signal], dict[str, str]]:
+    """在全量历史上为全部启用策略重算信号（与回测同一套 generate 逻辑），
+    以及需要映射到实际可交易标的的策略表（当前只有 vix_regime）。"""
+    all_signals: list[Signal] = []
+    trade_map: dict[str, str] = {}
+    for name, params in cfg.enabled_strategies():
+        group_symbols = cfg.symbols_for(params.get("groups", []))
+        if params.get("universe_file"):
+            group_symbols += [s for s in cfg.universe_symbols(params["universe_file"])
+                              if s not in group_symbols]
+        gp = {s: store.load_prices(conn, s) for s in group_symbols}
+        gp = {s: df for s, df in gp.items() if not df.empty}
+        if not gp:
+            continue
+        strat = strategies.build(name, params)
+        all_signals.extend(strat.generate(gp))
+        if name == "vix_regime":
+            trade_map[name] = params.get("trade_symbol", "SPY")
+    return all_signals, trade_map
+
+
+def render_strategy_scoring():
+    st.title("策略评分")
+    st.caption("统计口径：用策略在全量历史上重新生成的信号（与回测同一套逻辑）计算"
+               "信号发出后 5/20/60 个交易日的表现——只看单条信号本身，不涉及仓位与资金曲线。"
+               "buy 信号以上涨为正、sell 信号以下跌为正，已按方向调整符号，可直接跨方向比较正负。")
+
+    all_signals, trade_map = _all_strategy_signals()
+    if not all_signals:
+        st.warning("暂无信号，先运行 python run_daily.py 拉取数据")
+        return
+
+    needed_symbols = {s.symbol for s in all_signals} | set(trade_map.values())
+    all_prices = {s: store.load_prices(conn, s) for s in needed_symbols}
+    all_prices = {s: df for s, df in all_prices.items() if not df.empty}
+
+    fwd = signal_forward_returns(all_signals, all_prices, trade_symbol_map=trade_map)
+    if fwd.empty:
+        st.warning("信号发生日期与库内行情范围不匹配，暂时算不出前瞻收益")
+        return
+    summary = summarize_scores(fwd)
+
+    st.subheader("汇总记分卡")
+    show = pd.DataFrame({
+        "策略": summary["strategy"],
+        "方向": summary["direction"].map({"buy": "买入", "sell": "卖出"}),
+        "信号数": summary["n"],
+    })
+    for h in DEFAULT_HORIZONS:
+        show[f"{h}日均收益"] = summary[f"mean_{h}"]
+        show[f"{h}日胜率"] = summary[f"win_{h}"]
+    show = show.sort_values(["策略", "方向"]).reset_index(drop=True)
+
+    fmt = {f"{h}日均收益": (lambda v: "" if pd.isna(v) else f"{v:+.1%}") for h in DEFAULT_HORIZONS}
+    fmt.update({f"{h}日胜率": (lambda v: "" if pd.isna(v) else f"{v:.0%}") for h in DEFAULT_HORIZONS})
+    styler = (show.style
+              .map(signed_color, subset=[f"{h}日均收益" for h in DEFAULT_HORIZONS])
+              .format(fmt))
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+    low_sample = summary[summary["low_sample"]]
+    if not low_sample.empty:
+        names = "、".join(f"{r.strategy}({'买入' if r.direction == BUY else '卖出'})"
+                         for r in low_sample.itertuples())
+        st.caption(f"⚠️ 样本不足（信号数 < 10），统计意义弱，仅供参考：{names}")
+
+    st.subheader("信号明细")
+    st.caption("最近 20 条信号的逐条追踪：这是每条信号的真实成绩单，比回测更贴近实际使用体验"
+               "（回测假设机械执行整套策略，这里只看单条信号本身）。未到期的周期显示'待定'。")
+    pick = st.selectbox("策略", sorted(fwd["strategy"].unique()), key="scoring_detail_strategy")
+    detail = fwd[fwd["strategy"] == pick].sort_values("date", ascending=False).head(20).copy()
+    detail["direction"] = detail["direction"].map({"buy": "买入", "sell": "卖出"})
+    cols = ["date", "symbol", "direction", "signal_price", "price_now",
+            "ret_now", "ret_5", "ret_20", "ret_60"]
+    names = ["日期", "标的", "方向", "信号价", "现价", "至今收益", "5日收益", "20日收益", "60日收益"]
+    detail = detail[cols]
+    detail.columns = names
+
+    def fmt_ret(v):
+        return "待定" if pd.isna(v) else f"{v:+.1%}"
+
+    ret_cols = ["至今收益", "5日收益", "20日收益", "60日收益"]
+    styler2 = (detail.style.map(signed_color, subset=ret_cols)
+               .format({"信号价": "{:.2f}", "现价": "{:.2f}",
+                        **{c: fmt_ret for c in ret_cols}}))
+    st.dataframe(styler2, width="stretch", hide_index=True)
+
+
 PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum"}
 INITIAL_CASH = 10_000.0
 
@@ -276,10 +476,7 @@ def trades_table(trades: list[dict], with_symbol: bool = False):
     df = pd.DataFrame(trades)[cols]
     df.columns = names
 
-    def pnl_style(v):
-        return f"color: {BUY_FG}" if v > 0 else f"color: {SELL_FG}"
-
-    styler = (df.style.map(pnl_style, subset=["收益", "利润($)"])
+    styler = (df.style.map(signed_color, subset=["收益", "利润($)"])
               .format({"买入价": "{:.2f}", "卖出价": "{:.2f}",
                        "收益": "{:+.2%}", "利润($)": "{:+,.0f}"}))
     st.dataframe(styler, width="stretch", hide_index=True)
@@ -744,9 +941,11 @@ def render_strategy_docs():
 
 
 PAGES = {
+    "市场概览": render_market_overview,
     "信号历史": render_signal_history,
     "K线与信号": render_kline,
     "动量排名": render_momentum_rank,
+    "策略评分": render_strategy_scoring,
     "回测": render_backtest,
     "策略说明": render_strategy_docs,
 }

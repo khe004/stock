@@ -35,6 +35,17 @@ watchlist:
   volatility:           # 波动率指数（不可交易，用于情绪/风险信号）
     - ^VIX              # 恐慌指数
     - ^VIX3M            # 三个月期 VIX
+  macro:                # 宏观指数与资产（纯展示，不喂给任何策略）
+    - ^GSPC              # 标普500指数
+    - ^IXIC              # 纳斯达克综合指数
+    - ^DJI                # 道琼斯工业指数
+    - ^RUT                # 罗素2000指数
+    - ^TNX                # 10年期美债收益率
+    - ^IRX                # 3个月期美债收益率
+    - DX-Y.NYB            # 美元指数
+    - GC=F                # 黄金期货
+    - CL=F                # 原油 WTI 期货
+    - BTC-USD             # 比特币
 
 strategies:
   sma_cross:
