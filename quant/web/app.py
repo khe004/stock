@@ -26,7 +26,8 @@ from quant.data import store
 from quant.strategies.base import BUY, Signal, price_series
 from quant.strategies.rsi_reversal import wilder_rsi
 
-st.set_page_config(page_title="个人量化信号", page_icon="📈", layout="wide")
+st.set_page_config(page_title="个人量化信号", page_icon="📈", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 cfg = load_config()
 conn = store.connect(cfg.db_path)
@@ -941,14 +942,16 @@ def render_strategy_docs():
 
 
 PAGES = {
-    "市场概览": render_market_overview,
-    "信号历史": render_signal_history,
-    "K线与信号": render_kline,
-    "动量排名": render_momentum_rank,
-    "策略评分": render_strategy_scoring,
-    "回测": render_backtest,
-    "策略说明": render_strategy_docs,
+    "📊 市场概览": render_market_overview,
+    "📡 信号历史": render_signal_history,
+    "🕯️ K线与信号": render_kline,
+    "🏆 动量排名": render_momentum_rank,
+    "🎯 策略评分": render_strategy_scoring,
+    "🧪 回测": render_backtest,
+    "📖 策略说明": render_strategy_docs,
 }
 
-page = st.sidebar.radio("页面", list(PAGES))
+page = st.pills("页面导航", list(PAGES), default=next(iter(PAGES)),
+                required=True, label_visibility="collapsed")
+st.divider()
 PAGES[page]()
