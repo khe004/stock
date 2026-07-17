@@ -62,12 +62,14 @@ EOF
 launchctl unload "$PLIST" 2>/dev/null || true
 launchctl load "$PLIST"
 
+# 注意：macOS 自带 bash 3.2 会把紧跟在变量后的全角字符吞进变量名，
+# 变量一律用 ${VAR} 花括号形式，且不用全角括号包变量
 echo
 echo "✅ 部署完成"
-echo "   定时任务:   每天 $HOUR:$MINUTE 自动运行 run_daily.py（$LABEL）"
+echo "   定时任务:   每天 ${HOUR}:${MINUTE} 自动运行 run_daily.py (${LABEL})"
 echo "   立即试跑:   .venv/bin/python run_daily.py"
 echo "   查看日志:   tail -f logs/launchd.log"
 echo "   复盘面板:   .venv/bin/streamlit run quant/web/app.py"
-echo "   取消任务:   launchctl unload $PLIST && rm $PLIST"
+echo "   取消任务:   launchctl unload ${PLIST} && rm ${PLIST}"
 echo
 echo "提示: 如需 Telegram 推送，编辑 .env 填入 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID"
