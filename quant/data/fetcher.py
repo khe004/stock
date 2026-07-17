@@ -32,20 +32,27 @@ def _normalize(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_history(symbol: str, start: str) -> pd.DataFrame:
-    """拉取 start 至今的日线，带指数退避重试。失败抛 RuntimeError。"""
+    """拉取 start 至今的日线，带指数退避重试。失败抛 RuntimeError。
+
+    注意：yfinance 被限流时经常不抛异常而是静默返回空表，因此空表也按
+    可重试处理；重试用尽仍为空才返回空表（真退市的代码就是这种表现）。"""
     last_err: Exception | None = None
     for attempt in range(1, MAX_RETRIES + 1):
+        df = None
         try:
             df = yf.download(symbol, start=start, auto_adjust=False, progress=False)
-            if df is None or df.empty:
-                return pd.DataFrame()
-            return _normalize(df)
         except Exception as e:  # noqa: BLE001 - yfinance 抛的异常类型不稳定
             last_err = e
+        if df is not None and not df.empty:
+            return _normalize(df)
+        if attempt < MAX_RETRIES:
             wait = 2**attempt
-            log.warning("%s 第 %d 次拉取失败: %s，%ds 后重试", symbol, attempt, e, wait)
+            log.warning("%s 第 %d 次拉取%s，%ds 后重试", symbol, attempt,
+                        f"失败: {last_err}" if last_err else "返回空表（疑似限流）", wait)
             time.sleep(wait)
-    raise RuntimeError(f"{symbol}: 拉取失败（重试 {MAX_RETRIES} 次）: {last_err}")
+    if last_err is not None:
+        raise RuntimeError(f"{symbol}: 拉取失败（重试 {MAX_RETRIES} 次）: {last_err}")
+    return pd.DataFrame()
 
 
 def update_symbol(conn, symbol: str, history_start: str, full: bool = False) -> int:
