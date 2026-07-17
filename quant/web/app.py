@@ -117,6 +117,25 @@ def _macro_tile(col, symbol: str, df: pd.DataFrame | None):
             st.progress(min(1.0, max(0.0, pos)), text=f"52周区间 {pos:.0%}")
 
 
+def _data_date_caption(prices: dict[str, pd.DataFrame]):
+    """用美股指数的最新交易日作为"数据日期"锚点（比特币周末也交易，会误导）。
+    与今天的自然日差超过 4 天（可跨长周末）时标红提示可能没跑最新。"""
+    from datetime import date
+
+    index_syms = ["^GSPC", "^IXIC", "^DJI", "^RUT"]
+    dates = [prices[s].index[-1] for s in index_syms
+             if s in prices and not prices[s].empty]
+    if not dates:
+        return
+    data_date = max(dates).date()
+    gap = (date.today() - data_date).days
+    if gap <= 4:
+        st.caption(f"📅 数据日期：**{data_date:%Y-%m-%d}**（美股最新交易日）")
+    else:
+        st.caption(f"⚠️ 数据日期：**{data_date:%Y-%m-%d}**，距今 {gap} 天——"
+                   f"可能没跑最新，运行 `run_daily.py` 或 `scripts/run_now.command` 更新。")
+
+
 def render_market_overview():
     st.title("市场概览")
     symbols = list(dict.fromkeys(MACRO_ROW1 + MACRO_ROW2))  # TLT/QQQ 已在 broad/assets 组，一并加载
@@ -124,6 +143,8 @@ def render_market_overview():
     if all(df.empty for df in prices.values()):
         st.warning("库内没有宏观行情，先运行 python run_daily.py 拉取数据")
         return
+
+    _data_date_caption(prices)
 
     for row in (MACRO_ROW1, MACRO_ROW2):
         cols = st.columns(len(row))
