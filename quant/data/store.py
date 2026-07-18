@@ -1,5 +1,6 @@
-"""SQLite 存储：行情表 prices、信号表 signals。"""
+"""SQLite 存储：行情表 prices、信号表 signals、基本面表 fundamentals。"""
 
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -39,6 +40,31 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 """
 
+SCHEMA_FUNDAMENTALS = """
+CREATE TABLE IF NOT EXISTS fundamentals (
+    symbol          TEXT NOT NULL,
+    date            TEXT NOT NULL,
+    captured_at     TEXT NOT NULL,
+    trailing_pe     REAL,
+    forward_pe      REAL,
+    price_to_book   REAL,
+    price_to_sales  REAL,
+    ev_to_ebitda    REAL,
+    peg_ratio       REAL,
+    dividend_yield  REAL,
+    trailing_eps    REAL,
+    return_on_equity REAL,
+    profit_margins  REAL,
+    gross_margins   REAL,
+    debt_to_equity  REAL,
+    market_cap      REAL,
+    book_value      REAL,
+    beta            REAL,
+    raw_json        TEXT,
+    PRIMARY KEY (symbol, date)
+);
+"""
+
 
 # 迁移用：两张表的期望列。老版本库（早期在用户机器上重建过的 schema）可能缺列
 PRICES_COL_TYPES = {
@@ -47,6 +73,13 @@ PRICES_COL_TYPES = {
 }
 SIGNALS_COLS = {"id", "date", "symbol", "strategy", "direction",
                 "price", "strength", "reason", "created_at", "notified_at"}
+FUNDAMENTALS_COLS = {
+    "symbol", "date", "captured_at",
+    "trailing_pe", "forward_pe", "price_to_book", "price_to_sales",
+    "ev_to_ebitda", "peg_ratio", "dividend_yield", "trailing_eps",
+    "return_on_equity", "profit_margins", "gross_margins", "debt_to_equity",
+    "market_cap", "book_value", "beta", "raw_json",
+}
 
 
 def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -66,6 +99,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(SCHEMA)
         log.warning("signals 表结构过旧，已重建（旧表保留为 signals_legacy）；"
                     "历史信号可用 run_daily.py --date 补跑重算")
+    # fundamentals 表：数据宝贵不 DROP，只补缺列
+    if "fundamentals" not in {row[0] for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}:
+        conn.executescript(SCHEMA_FUNDAMENTALS)
+        log.info("fundamentals 表不存在，已自动创建")
     conn.commit()
 
 
@@ -75,6 +113,7 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    conn.executescript(SCHEMA_FUNDAMENTALS)
     _migrate(conn)
     return conn
 
@@ -173,4 +212,58 @@ def load_signals(
         query += " AND date >= ?"
         params.append(start)
     query += " ORDER BY date DESC, symbol"
+    return pd.read_sql_query(query, conn, params=params)
+
+
+def upsert_fundamentals(conn: sqlite3.Connection, symbol: str, date: str,
+                        captured_at: str, metrics: dict, raw: dict) -> int:
+    """写入基本面快照，(symbol, date) 已存在则覆盖。返回 1。"""
+    conn.execute(
+        """INSERT OR REPLACE INTO fundamentals
+           (symbol, date, captured_at,
+            trailing_pe, forward_pe, price_to_book, price_to_sales,
+            ev_to_ebitda, peg_ratio, dividend_yield, trailing_eps,
+            return_on_equity, profit_margins, gross_margins, debt_to_equity,
+            market_cap, book_value, beta, raw_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            symbol, date, captured_at,
+            metrics.get("trailing_pe"), metrics.get("forward_pe"),
+            metrics.get("price_to_book"), metrics.get("price_to_sales"),
+            metrics.get("ev_to_ebitda"), metrics.get("peg_ratio"),
+            metrics.get("dividend_yield"), metrics.get("trailing_eps"),
+            metrics.get("return_on_equity"), metrics.get("profit_margins"),
+            metrics.get("gross_margins"), metrics.get("debt_to_equity"),
+            metrics.get("market_cap"), metrics.get("book_value"),
+            metrics.get("beta"),
+            json.dumps(raw, ensure_ascii=False) if raw else None,
+        ),
+    )
+    conn.commit()
+    return 1
+
+
+def latest_fundamentals_date(conn: sqlite3.Connection, symbol: str) -> str | None:
+    """返回该标的最新一条基本面快照的日期，无记录返回 None。"""
+    row = conn.execute(
+        "SELECT MAX(date) AS d FROM fundamentals WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    return row["d"]
+
+
+def load_fundamentals(
+    conn: sqlite3.Connection,
+    symbol: str | None = None,
+    start: str | None = None,
+) -> pd.DataFrame:
+    """按日期升序返回基本面快照（含 raw_json）。"""
+    query = "SELECT * FROM fundamentals WHERE 1=1"
+    params: list = []
+    if symbol:
+        query += " AND symbol = ?"
+        params.append(symbol)
+    if start:
+        query += " AND date >= ?"
+        params.append(start)
+    query += " ORDER BY symbol, date"
     return pd.read_sql_query(query, conn, params=params)

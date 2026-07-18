@@ -88,3 +88,75 @@ def update_all(conn, symbols: list[str], history_start: str,
             log.error("%s 更新失败: %s", symbol, e)
             failed.append(symbol)
     return total, failed
+
+
+# ---------- 基本面快照 ----------
+
+# yfinance info 键 → 本地列名
+_FUNDAMENTALS_MAP = {
+    "trailingPE": "trailing_pe",
+    "forwardPE": "forward_pe",
+    "priceToBook": "price_to_book",
+    "priceToSalesTrailing12Months": "price_to_sales",
+    "enterpriseToEbitda": "ev_to_ebitda",
+    "pegRatio": "peg_ratio",
+    "dividendYield": "dividend_yield",
+    "trailingEps": "trailing_eps",
+    "returnOnEquity": "return_on_equity",
+    "profitMargins": "profit_margins",
+    "grossMargins": "gross_margins",
+    "debtToEquity": "debt_to_equity",
+    "marketCap": "market_cap",
+    "bookValue": "book_value",
+    "beta": "beta",
+}
+
+
+def fetch_fundamentals(symbol: str) -> dict | None:
+    """拉取 yfinance ticker.info 全量数据，带指数退避重试。
+
+    返回 {"metrics": {抽取列}, "raw": {完整 info}} 或 None（重试用尽仍失败）。"""
+    last_err: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        info = None
+        try:
+            info = yf.Ticker(symbol).info
+        except Exception as e:  # noqa: BLE001 - yfinance 抛的异常类型不稳定
+            last_err = e
+        if info:
+            metrics = {local: info.get(yf_key) for yf_key, local in _FUNDAMENTALS_MAP.items()}
+            return {"metrics": metrics, "raw": info}
+        if attempt < MAX_RETRIES:
+            wait = 2 ** attempt
+            log.warning("%s 基本面第 %d 次拉取%s，%ds 后重试", symbol, attempt,
+                        f"失败: {last_err}" if last_err else "返回空（疑似限流）", wait)
+            time.sleep(wait)
+    log.error("%s 基本面拉取失败（重试 %d 次）: %s", symbol, MAX_RETRIES,
+              last_err or "info 为空")
+    return None
+
+
+def update_fundamentals(conn, symbols: list[str], as_of_date: str,
+                        stale_days: int = 7) -> tuple[int, list[str]]:
+    """批量更新基本面快照。每个 symbol 若最近 stale_days 天内已有记录则跳过（自限流）。
+
+    返回 (成功数, 失败列表)。单个失败只记日志，不中断批量。"""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.strptime(as_of_date, "%Y-%m-%d") - timedelta(days=stale_days)).strftime("%Y-%m-%d")
+    ok_count, failed = 0, []
+    for symbol in symbols:
+        latest = store.latest_fundamentals_date(conn, symbol)
+        if latest and latest >= cutoff:
+            log.debug("%s 基本面已是最新（%s），跳过", symbol, latest)
+            continue
+        result = fetch_fundamentals(symbol)
+        if result is None:
+            log.error("%s 基本面抓取失败，跳过", symbol)
+            failed.append(symbol)
+            continue
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        store.upsert_fundamentals(conn, symbol, as_of_date, captured_at,
+                                  result["metrics"], result["raw"])
+        log.info("%s 基本面快照已更新 (date=%s)", symbol, as_of_date)
+        ok_count += 1
+    return ok_count, failed
