@@ -800,6 +800,11 @@ def render_backtest():
     st.title("回测")
     strategy_name = st.selectbox("策略", strategy_names)
     params = strategy_params[strategy_name]
+    if strategy_name == "stock_momentum":
+        st.warning(
+            "⚠️ 仅观察策略：历史超额几乎全部来自 NVDA 单只标的，剔除后跑不赢“池子等权”基准。"
+            "回测曲线不代表可复制的 alpha，勿据此实盘。"
+        )
     if strategy_name in PORTFOLIO_STRATEGIES:
         _render_portfolio_bt(strategy_name, params)
     elif strategy_name == "smart_dca":
@@ -953,7 +958,14 @@ def render_strategy_docs():
 三是**个股波动**：{sm["top_n"]} 只集中持仓的回撤和波动显著高于指数，看 Calmar 别只看总收益。
 
 **作用范围**：动态流动性池（候选超集见 `{sm["universe_file"]}`，建议每半年手工更新）。
-
+""")
+    st.warning(
+        "⚠️ 仅观察，不建议实盘。"
+        "敏感性检验结论：剔除 NVDA 单只标的即让 2015–2020 收益跑输 SPY/QQQ，"
+        "且剔除后连“池子等权”基准都跑不赢——历史超额几乎全部来自 NVDA 的集中暴露，"
+        "12-1 排名本身未加信息（等权反而更强）。请勿凭回测曲线给该策略分配真实资金。"
+    )
+    st.markdown("""
 ---
 
 *参数在 `config.yaml` 中修改，本页数值实时读取当前配置。回测统一使用复权价（含分红）
