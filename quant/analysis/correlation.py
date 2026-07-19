@@ -4,7 +4,7 @@
 用于诊断现有策略的分散效果。
 
 方法论口径：
-- 组合类策略（momentum/dual_momentum/stock_momentum）→ engine.run_portfolio_backtest
+- 组合类策略（momentum/dual_momentum/stock_momentum/low_vol）→ engine.run_portfolio_backtest
   取权益曲线
 - smart_dca → engine.run_smart_dca_backtest 取权益曲线
 - 单标的策略（sma_cross/rsi_reversal）→ 对该策略涉及的每个标的各跑
@@ -30,7 +30,7 @@ from quant.backtest.engine import (
 from quant.strategies.base import BUY, Signal, price_series
 
 # 与 app.py 保持一致的分类
-PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum"}
+PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum", "low_vol"}
 
 
 def _portfolio_return_series(

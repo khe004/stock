@@ -244,3 +244,131 @@ def test_stock_momentum_exclude(stock_momentum_prices):
     bought = {s.symbol for s in signals if s.direction == BUY}
     assert "AAA" not in bought, "被剔除的标的不应出现在持仓中"
     assert "BBB" in bought, "剔除后次强者应顶上"
+
+
+# ──────────────── low_vol 低波动因子测试 ────────────────
+
+@pytest.fixture
+def low_vol_prices():
+    """构造波动率明显不同的标的：
+    - CALM: 每日涨 0.05%，极低波动
+    - STEADY: 每日涨 0.1%，低波动
+    - NORMAL: 每日涨 0.2%，中等波动
+    - WILD: 每日涨跌交替 ±3%，高波动
+    - CRAZY: 每日涨跌交替 ±5%，极高波动
+    """
+    n = 130  # 足够覆盖 90 日 lookback + 至少两个月度调仓日
+    # CALM: 极低波动（每日稳定微涨）
+    calm = 100 * 1.0005 ** np.arange(n)
+    # STEADY: 低波动（每日稳定涨）
+    steady = 100 * 1.001 ** np.arange(n)
+    # NORMAL: 中等波动
+    normal = 100 * 1.002 ** np.arange(n)
+    # WILD: 高波动（大幅涨跌交替）
+    wild_mult = np.where(np.arange(n) % 2 == 0, 1.03, 0.97)
+    wild = 100 * np.cumprod(wild_mult)
+    # CRAZY: 极高波动（更大幅涨跌交替）
+    crazy_mult = np.where(np.arange(n) % 2 == 0, 1.05, 0.95)
+    crazy = 100 * np.cumprod(crazy_mult)
+
+    return {
+        "CALM": make_df(calm),
+        "STEADY": make_df(steady),
+        "NORMAL": make_df(normal),
+        "WILD": make_df(wild),
+        "CRAZY": make_df(crazy),
+    }
+
+
+def test_low_vol_selects_lowest_volatility(low_vol_prices):
+    """低波动策略应选中波动率最低的 top_n 只。"""
+    from quant.strategies.low_vol import LowVol
+
+    signals = LowVol(lookback_days=30, top_n=2).generate(low_vol_prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "应有买入信号"
+    bought = {s.symbol for s in buys}
+    # CALM 和 STEADY 波动率最低，应被选中
+    assert "CALM" in bought, "波动最低的 CALM 应被选中"
+    assert "STEADY" in bought, "波动次低的 STEADY 应被选中"
+    # 高波动的不应被选中
+    assert "WILD" not in bought, "高波动的 WILD 不应被选中"
+    assert "CRAZY" not in bought, "极高波动的 CRAZY 不应被选中"
+
+
+def test_low_vol_monthly_rebalance_buy_sell(low_vol_prices):
+    """低波动策略月度调仓：进出组合应产生 BUY/SELL 信号。"""
+    from quant.strategies.low_vol import LowVol
+
+    # 用 top_n=2，先让 CALM/STEADY 被选中
+    # 然后修改价格让 CALM 的波动率在后半段变高（被踢出），验证 SELL 信号
+    prices = dict(low_vol_prices)
+    n = 130
+    # 把 CALM 后半段改成高波动
+    calm_first = list(100 * 1.0005 ** np.arange(65))
+    calm_wild = list(np.array(calm_first[-1:] * 65) *
+                     np.cumprod(np.where(np.arange(65) % 2 == 0, 1.04, 0.96)))
+    calm_combined = np.array(calm_first + list(calm_wild))[:n]
+    prices["CALM"] = make_df(calm_combined)
+
+    signals = LowVol(lookback_days=30, top_n=2).generate(prices)
+    # 应有 CALM 的 SELL 信号（波动升高被踢出）
+    calm_sells = [s for s in signals if s.symbol == "CALM" and s.direction == SELL]
+    # 也应有某只低波动标的的 BUY 替代
+    buys = [s for s in signals if s.direction == BUY]
+    sells = [s for s in signals if s.direction == SELL]
+    assert buys, "应有买入信号"
+    # 验证有卖出信号（组合调仓）
+    assert sells, "月度调仓应有卖出信号"
+
+
+def test_low_vol_reason_contains_numbers(low_vol_prices):
+    """低波动信号的 reason 必须含波动率数值。"""
+    from quant.strategies.low_vol import LowVol
+
+    signals = LowVol(lookback_days=30, top_n=2).generate(low_vol_prices)
+    assert signals, "应有信号"
+    for s in signals:
+        # reason 应包含 "年化波动" 以及百分比数值
+        assert "波动" in s.reason, f"reason 应含'波动'：{s.reason}"
+        if s.direction == BUY:
+            assert "%" in s.reason, f"买入 reason 应含波动率数值：{s.reason}"
+            assert "名" in s.reason, f"买入 reason 应含排名：{s.reason}"
+
+
+def test_low_vol_strength_in_range(low_vol_prices):
+    """低波动信号的 strength 应在 0~1 范围。"""
+    from quant.strategies.low_vol import LowVol
+
+    signals = LowVol(lookback_days=30, top_n=2).generate(low_vol_prices)
+    assert signals, "应有信号"
+    for s in signals:
+        assert 0 < s.strength <= 1, f"strength 应在 (0, 1]：{s.strength}"
+
+
+def test_low_vol_no_signal_when_window_insufficient():
+    """波动率回看窗口不足时不应发信号。"""
+    from quant.strategies.low_vol import LowVol
+
+    # 只有 20 天数据，lookback=30 不够算波动率
+    short_prices = {
+        "A": make_df(np.linspace(100, 110, 20)),
+        "B": make_df(np.linspace(100, 105, 20)),
+        "C": make_df(np.linspace(100, 108, 20)),
+        "D": make_df(np.linspace(100, 103, 20)),
+    }
+    signals = LowVol(lookback_days=30, top_n=2).generate(short_prices)
+    assert signals == [], "数据不足窗口时不应发信号"
+
+
+def test_low_vol_not_enough_symbols():
+    """标的数不足 top_n 时不发信号。"""
+    from quant.strategies.low_vol import LowVol
+
+    prices = {
+        "A": make_df(100 * 1.001 ** np.arange(100)),
+        "B": make_df(100 * 1.002 ** np.arange(100)),
+    }
+    signals = LowVol(lookback_days=30, top_n=3).generate(prices)
+    assert signals == [], "标的数 <= top_n 时不应发信号"
+

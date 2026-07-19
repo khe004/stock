@@ -459,7 +459,7 @@ def render_correlation():
             "把每个启用策略化简成一条**日收益率序列**，然后算策略间的 Pearson 相关系数矩阵：\n\n"
             "| 策略类型 | 如何化简 |\n"
             "|---------|--------|\n"
-            "| 组合轮动（momentum / dual_momentum / stock_momentum） "
+            "| 组合轮动（momentum / dual_momentum / stock_momentum / low_vol） "
             "| 用 `run_portfolio_backtest` 跑出权益曲线，再 `pct_change()` 转日收益率 |\n"
             "| smart_dca "
             "| 用 `run_smart_dca_backtest` 跑出权益曲线 |\n"
@@ -674,7 +674,7 @@ def render_correlation():
             st.warning("等权组合波动率反而高于单策略平均——可能是策略数太少或正好同涨同跌。")
 
 
-PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum"}
+PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum", "low_vol"}
 INITIAL_CASH = 10_000.0
 
 RISK_COLS = {
@@ -1202,6 +1202,40 @@ def render_strategy_docs():
         "且剔除后连“池子等权”基准都跑不赢——历史超额几乎全部来自 NVDA 的集中暴露，"
         "12-1 排名本身未加信息（等权反而更强）。请勿凭回测曲线给该策略分配真实资金。"
     )
+    lv = strategy_params.get("low_vol", {"lookback_days": 90, "top_n": 3})
+    st.markdown(f"""
+---
+
+## 8. low_vol 低波动因子（首个非动量分散因子）
+
+**低波动异象是什么**：传统金融理论认为高风险应有高回报（CAPM），但大量实证研究
+（Baker, Bradley & Wurgler 2011; Ang et al. 2006）发现低波动资产的长期**风险调整后收益反而更好**。
+原因包括：投资者的彩票偏好（高估高波动股的暴涨概率）、杠杆约束（机构不能杠杆买低波动所以它被低估）、
+以及基准追踪导致基金经理系统性忽视低波动标的。
+
+**本策略怎么算**：每月首个交易日——
+1. 计算各标的近 {lv["lookback_days"]} 个交易日的**已实现波动率**（日收益率标准差 × √252 年化），
+   收益率用总回报口径（复权价，含分红再投资）；
+2. 横截面排名，波动率最低的前 {lv["top_n"]} 只纳入持仓组合；
+3. 新进入最低波动前 {lv["top_n"]} → 买入；跌出 → 卖出。先卖后买，月度调仓。
+
+**参数含义**：
+- `lookback_days`（当前 {lv["lookback_days"]}）：波动率回看窗口天数。越长越稳定（减少换手），
+  越短越灵敏（快速反映近期波动变化）。90 日约 4 个月，是常用的中等窗口。
+- `top_n`（当前 {lv["top_n"]}）：持有波动最低的前 N 只。与 momentum 同为 3，方便对比。
+
+**它的定位**：本平台首个**非动量因子**。现有策略多为动量家族
+（momentum / dual_momentum / stock_momentum 都基于"强者恒强"），平均相关系数约 0.51，
+叠加使用分散效果有限。低波动因子的选择标准与动量正交——动量选"涨得猛的"，低波动选"波动小的"——
+理论上低相关，能真正补分散。可到「策略相关性」页验证 low_vol 与 momentum 的实际相关系数。
+
+**何时灵**：市场风格轮动偏防御、高波动板块回调的行情（如 2022 年科技股暴跌而公用事业/消费稳守）。
+
+**何时坑**：单边大牛市中低波动板块严重跑输高动量板块（如 2023-2024 AI 行情中 XLP/XLU 远逊 XLK/SMH），
+持有体验差。另外行业 ETF 层面的波动率差异有时很小，排名可能因微小差异频繁换手。
+
+**作用范围**：11 只行业 ETF（与 momentum 共享 sectors 组，方便相关性对比）。
+""")
     st.markdown("""
 ---
 

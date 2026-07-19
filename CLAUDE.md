@@ -28,8 +28,9 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 - `quant/web/app.py`：八页面板（市场概览/信号历史/K线/动量排名/策略评分/策略相关性/回测/策略说明）；
   回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
 
-七个策略：sma_cross、momentum（行业轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
-dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）。
+八个策略：sma_cross、momentum（行业轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
+dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）、
+low_vol（行业 ETF 低波动因子，首个非动量分散因子）。
 
 ## 关键设计决策（改动前务必理解）
 
