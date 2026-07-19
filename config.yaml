@@ -97,11 +97,13 @@ strategies:
     regime_ma: 200        # 大盘跌破 200 日均线 → 整体切避险
     safe_asset: TLT
     groups: [broad, assets]
-  low_vol:                  # 低波动因子：行业 ETF 中波动最低的前 N 只，首个非动量分散因子
+  low_vol:                  # 低波动因子：一篮子 ETF 中波动最低的前 N 只，首个非动量分散因子
     enabled: true
     lookback_days: 90       # 波动率回看窗口（日），约 4 个月
     top_n: 3                # 持有波动最低的前 N 只
-    groups: [sectors]       # 与 momentum 同宇宙、反选择标准，便于相关性对照
+    groups: [sectors, assets]  # 行业 ETF + 资产类（含 TLT 长债/GLD 黄金）：
+                            # 扩宇宙让低波动能选到非股票资产，降低与动量家族的相关性
+                            # （sectors-only 时因同为长多股票、共享市场beta，相关仍约0.5）
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

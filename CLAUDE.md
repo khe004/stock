@@ -30,7 +30,7 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 
 八个策略：sma_cross、momentum（行业轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
 dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）、
-low_vol（行业 ETF 低波动因子，首个非动量分散因子）。
+low_vol（行业 ETF + 债金低波动因子，首个非动量分散因子；扩宇宙含 TLT/GLD 后与 momentum 相关约 0.26）。
 
 ## 关键设计决策（改动前务必理解）
 
