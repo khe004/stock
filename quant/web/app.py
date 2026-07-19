@@ -11,6 +11,11 @@ import streamlit as st
 from plotly.subplots import make_subplots
 
 from quant import strategies
+from quant.analysis.correlation import (
+    combined_portfolio,
+    correlation_matrix,
+    strategy_return_series,
+)
 from quant.analysis.market import range_position, sector_breadth, yield_curve_spread
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.backtest.engine import (
@@ -435,6 +440,238 @@ def render_strategy_scoring():
                .format({"信号价": "{:.2f}", "现价": "{:.2f}",
                         **{c: fmt_ret for c in ret_cols}}))
     st.dataframe(styler2, width="stretch", hide_index=True)
+
+
+def render_correlation():
+    """策略相关性 / 组合诊断页面：展示策略间 Pearson 相关矩阵、自动解读冗余/分散对、
+    等权组合与各单策略的风险收益对比。
+
+    取数逻辑复用 _all_strategy_signals()，回测逻辑委托给 correlation.py 纯函数。
+    """
+    import plotly.figure_factory as ff
+
+    st.title("策略相关性 / 组合诊断")
+
+    # ── 方法论说明 ──────────────────────────────────
+    with st.expander("本页在算什么 / 怎么解读", expanded=False):
+        st.markdown(
+            "**方法论**\n\n"
+            "把每个启用策略化简成一条**日收益率序列**，然后算策略间的 Pearson 相关系数矩阵：\n\n"
+            "| 策略类型 | 如何化简 |\n"
+            "|---------|--------|\n"
+            "| 组合轮动（momentum / dual_momentum / stock_momentum） "
+            "| 用 `run_portfolio_backtest` 跑出权益曲线，再 `pct_change()` 转日收益率 |\n"
+            "| smart_dca "
+            "| 用 `run_smart_dca_backtest` 跑出权益曲线 |\n"
+            "| 单标的（sma_cross / rsi_reversal） "
+            "| 对该策略交易的**每个标的**各跑 `run_backtest`，取各标的权益曲线日收益率的"
+            "**等权平均**作为该策略的收益序列 |\n"
+            "| vix_regime "
+            "| 映射到实际可交易标的（默认 SPY）后按单标的方式处理 |\n\n"
+            "所有回测使用统一的单边成本（config `cost_bps`），价格为复权价（总回报口径）。\n\n"
+            "**如何解读**\n\n"
+            "- **高相关（> 0.6）= 冗余**：两个策略在大部分时间涨跌一致，"
+            "叠加使用 = 给同一个因子加杠杆，分散不了风险\n"
+            "- **低相关（0 ~ 0.3）= 有分散效果**：涨跌关联弱，组合波动低于单策略\n"
+            "- **负相关（< 0）= 真正分散**：一赚一亏的对冲效果最强，"
+            "但实际中长期负相关很少见\n\n"
+            "本项目的策略多为**动量家族**（momentum / dual_momentum / stock_momentum "
+            "都基于\"强者恒强\"），预期它们之间高度相关——叠加运行并不能带来真正的分散。"
+        )
+        st.warning(
+            "**口径局限的诚实说明**\n\n"
+            "策略空仓持现金时当日收益 = 0，这段\"共同不动\"的时间会被 Pearson 全序列口径计入，"
+            "导致相关系数被稀释（偏低）。换言之，**仅看策略都在场内的日子，实际相关性可能更高**。"
+            "解读时需知晓此局限——本页展示的是保守估计。"
+        )
+
+    # ── 日期区间选择 ──────────────────────────────────
+    range_label = st.radio("回测区间", list(RANGE_OPTIONS), index=3, horizontal=True,
+                           key="corr_range")
+    range_days = RANGE_OPTIONS[range_label]
+
+    # ── 取数：复用 _all_strategy_signals 逻辑 ──────────
+    with st.spinner("正在为各策略生成信号并回测收益序列……"):
+        all_signals, trade_map = _all_strategy_signals()
+        has_smart_dca = any(n == "smart_dca" for n, _ in cfg.enabled_strategies())
+        if not all_signals and not has_smart_dca:
+            st.warning("暂无策略信号，先运行 python run_daily.py 拉取数据")
+            return
+
+        # 按策略分组信号
+        signals_by_strategy: dict[str, list[Signal]] = {}
+        for s in all_signals:
+            signals_by_strategy.setdefault(s.strategy, []).append(s)
+
+        # 构建每个策略的标的列表和参数
+        strat_params: dict[str, dict] = {}
+        strat_symbols: dict[str, list[str]] = {}
+        for name, params in cfg.enabled_strategies():
+            strat_params[name] = params
+            group_symbols = cfg.symbols_for(params.get("groups", []))
+            if params.get("universe_file"):
+                group_symbols += [s for s in cfg.universe_symbols(params["universe_file"])
+                                  if s not in group_symbols]
+            strat_symbols[name] = group_symbols
+            # smart_dca 无信号但仍需处理
+            if name == "smart_dca" and name not in signals_by_strategy:
+                signals_by_strategy[name] = []
+
+        # 加载所需价格
+        needed: set[str] = set()
+        for syms in strat_symbols.values():
+            needed.update(syms)
+        needed.update(trade_map.values())
+        prices = {s: store.load_prices(conn, s) for s in needed}
+        prices = {s: df for s, df in prices.items() if not df.empty}
+
+        # 区间截取
+        if range_days is not None:
+            prices = {s: df.iloc[-range_days:] for s, df in prices.items()
+                      if len(df) >= 2}
+
+        returns_df = strategy_return_series(
+            prices, signals_by_strategy, strat_params, strat_symbols,
+            cfg.cost_bps, trade_map,
+        )
+
+    if returns_df.empty or returns_df.shape[1] < 2:
+        st.warning("需要至少 2 个策略才能计算相关性。当前成功构建收益序列的策略不足。")
+        if not returns_df.empty:
+            st.info("仅有策略：" + ", ".join(returns_df.columns))
+        return
+
+    # ── 按共同交易日对齐 ──────────────────────────────
+    aligned = returns_df.dropna()
+    if aligned.empty or len(aligned) < 2:
+        st.warning("各策略的共同交易日不足，无法计算相关性。")
+        return
+    st.caption(
+        "共 " + str(len(aligned)) + " 个共同交易日 · "
+        + str(returns_df.shape[1]) + " 个策略 · "
+        "区间 " + aligned.index[0].strftime("%Y-%m-%d") + " ~ "
+        + aligned.index[-1].strftime("%Y-%m-%d")
+    )
+
+    # ── 1. 相关性热力图 ────────────────────────────────
+    st.subheader("策略相关性热力图")
+    corr = correlation_matrix(aligned)
+
+    z = corr.values.tolist()
+    labels = list(corr.columns)
+    annotations = [["{:.2f}".format(corr.iloc[i, j]) for j in range(len(labels))]
+                   for i in range(len(labels))]
+    heatmap = ff.create_annotated_heatmap(
+        z=z, x=labels, y=labels,
+        annotation_text=annotations,
+        colorscale="RdBu_r", showscale=True,
+        zmin=-1, zmax=1,
+    )
+    heatmap.update_layout(
+        height=max(400, 80 * len(labels)),
+        xaxis=dict(side="bottom"),
+        margin=dict(l=20, r=20, t=30, b=20),
+    )
+    font_color = "#fff" if _DARK else "#000"
+    for ann in heatmap.layout.annotations:
+        ann.font = dict(color=font_color, size=13)
+    st.plotly_chart(heatmap, width="stretch")
+
+    # ── 2. 自动解读 ────────────────────────────────────
+    st.subheader("自动解读")
+    pairs: list[tuple[str, str, float]] = []
+    n_strats = len(labels)
+    for i in range(n_strats):
+        for j in range(i + 1, n_strats):
+            pairs.append((labels[i], labels[j], float(corr.iloc[i, j])))
+    pairs.sort(key=lambda x: x[2], reverse=True)
+
+    avg_corr = sum(p[2] for p in pairs) / len(pairs) if pairs else 0.0
+    if avg_corr > 0.5:
+        delta_text = "偏高，分散不足"
+        delta_clr = "inverse"
+    elif avg_corr > 0.3:
+        delta_text = "中等"
+        delta_clr = "normal"
+    else:
+        delta_text = "较低，分散尚可"
+        delta_clr = "normal"
+    st.metric("策略间平均相关系数", "{:.2f}".format(avg_corr),
+              delta=delta_text, delta_color=delta_clr)
+
+    col_r, col_d = st.columns(2)
+    with col_r:
+        st.markdown("**冗余 / 重复（相关系数最高的对）**")
+        redundant = [p for p in pairs if p[2] > 0.5]
+        if redundant:
+            for a, b, c in redundant[:5]:
+                icon = "🔴" if c > 0.7 else "🟠"
+                st.markdown("- **{}** ↔ **{}**：`{:.2f}` {}".format(a, b, c, icon))
+        else:
+            st.info("没有相关系数 > 0.5 的策略对")
+
+    with col_d:
+        st.markdown("**真分散（相关系数最低 / 负相关的对）**")
+        diversified = sorted(pairs, key=lambda x: x[2])[:5]
+        for a, b, c in diversified:
+            icon = "🟢" if c < 0.3 else "🟡"
+            st.markdown("- **{}** ↔ **{}**：`{:.2f}` {}".format(a, b, c, icon))
+
+    # ── 3. 等权组合 vs 各单策略 ───────────────────────
+    st.subheader("等权组合 vs 各单策略")
+    st.caption(
+        "等权组合 = 把资金等分到所有策略，每天组合收益是各策略日收益率的算术平均。"
+        "如果策略间高度相关，组合的波动和回撤与单策略差不多（分散无效）；"
+        "反之，组合应该更平稳（波动更低、回撤更小）。"
+    )
+
+    combo_equity, combo_metrics = combined_portfolio(aligned)
+    if combo_equity.empty:
+        st.warning("无法构建等权组合")
+        return
+
+    from quant.backtest.engine import equity_metrics as _eq_metrics
+    compare_rows: dict[str, dict] = {"等权组合": combo_metrics}
+    for col_name in aligned.columns:
+        single_eq = INITIAL_CASH * (1 + aligned[col_name]).cumprod()
+        compare_rows[col_name] = _eq_metrics(single_eq, INITIAL_CASH)
+
+    compare = pd.DataFrame(compare_rows).T
+    compare = compare.rename(columns=RISK_COLS)
+
+    def highlight_best(col):
+        best = col.min() if col.name == "年化波动" else col.max()
+        return ["background-color: {}; font-weight: bold".format(BUY_BG)
+                if v == best else "" for v in col]
+
+    def combo_row_style(row):
+        if row.name == "等权组合":
+            return ["background-color: rgba(33, 150, 243, 0.15); font-weight: bold"] * len(row)
+        return [""] * len(row)
+
+    styler = (compare.style
+              .apply(highlight_best, axis=0)
+              .apply(combo_row_style, axis=1)
+              .format({"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
+                       "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}))
+    st.dataframe(styler, width="stretch")
+
+    # 分散效果小结
+    combo_vol = combo_metrics.get("volatility", 0)
+    avg_single_vol = sum(
+        compare_rows[c].get("volatility", 0) for c in aligned.columns
+    ) / len(aligned.columns)
+    if avg_single_vol > 0:
+        reduction = 1 - combo_vol / avg_single_vol
+        if reduction > 0.1:
+            st.success("等权组合波动率比单策略平均低 {:.0%}——分散有一定效果。".format(reduction))
+        elif reduction > 0:
+            st.info(
+                "等权组合波动率仅比单策略平均低 {:.0%}——分散效果有限，".format(reduction)
+                + "说明策略间高度相关。"
+            )
+        else:
+            st.warning("等权组合波动率反而高于单策略平均——可能是策略数太少或正好同涨同跌。")
 
 
 PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum"}
@@ -980,6 +1217,7 @@ PAGES = {
     "🕯️ K线与信号": render_kline,
     "🏆 动量排名": render_momentum_rank,
     "🎯 策略评分": render_strategy_scoring,
+    "🔗 策略相关性": render_correlation,
     "🧪 回测": render_backtest,
     "📖 策略说明": render_strategy_docs,
 }
