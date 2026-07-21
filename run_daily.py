@@ -48,7 +48,7 @@ def dispatch(cfg, subject: str, text: str) -> bool:
 
 def format_message(rows) -> str:
     date = rows[0]["date"]
-    lines = [f"📈 量化信号 {date}" if all(r["date"] == date for r in rows) else "📈 量化信号（含补跑）"]
+    lines = [f"📈 投资信号 {date}" if all(r["date"] == date for r in rows) else "📈 投资信号（含补跑）"]
     for r in rows:
         icon = "🟢 买入" if r["direction"] == BUY else "🔴 卖出"
         lines.append(f"{icon} {r['symbol']} ${r['price']:.2f} [{r['strategy']}]")
@@ -58,7 +58,7 @@ def format_message(rows) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="每日量化信号")
+    parser = argparse.ArgumentParser(description="每日投资信号")
     parser.add_argument("--date", help="只保留该日期(YYYY-MM-DD)的信号，默认取行情最新一天（用于补跑）")
     parser.add_argument("--no-fetch", action="store_true", help="跳过数据更新，直接用库内数据")
     parser.add_argument("--no-notify", action="store_true", help="不推送，只入库")
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_notify:
         pending = store.unnotified_signals(conn)
         if pending:
-            subject = f"📈 量化信号 {as_of}（{len(pending)} 条）"
+            subject = f"📈 投资信号 {as_of}（{len(pending)} 条）"
             ok = dispatch(cfg, subject, format_message(pending))
             if ok:
                 store.mark_notified(conn, [r["id"] for r in pending])

@@ -23,7 +23,7 @@ def send_email(subject: str, text: str) -> bool:
 
     msg = MIMEText(text, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"] = formataddr(("量化信号", user))
+    msg["From"] = formataddr(("投资信号", user))
     msg["To"] = ", ".join(to)
 
     try:

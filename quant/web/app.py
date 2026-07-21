@@ -31,7 +31,7 @@ from quant.data import store
 from quant.strategies.base import BUY, Signal, price_series
 from quant.strategies.rsi_reversal import wilder_rsi
 
-st.set_page_config(page_title="个人量化信号", page_icon="📈", layout="wide",
+st.set_page_config(page_title="个人投资平台", page_icon="📈", layout="wide",
                    initial_sidebar_state="collapsed")
 
 cfg = load_config()

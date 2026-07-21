@@ -1,4 +1,4 @@
-# 个人量化信号平台配置
+# 个人投资平台配置
 database: data/quant.db
 history_start: "2015-01-01"
 
