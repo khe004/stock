@@ -851,6 +851,18 @@ def pool_equal_weight_equity(prices: dict[str, pd.DataFrame],
     return equity.rename("pool_ew")
 
 
+def equal_weight_equity(prices: dict[str, pd.DataFrame],
+                        initial_cash: float) -> pd.Series | None:
+    """等权基准：宇宙内全部标的每日等权持有（日度再平衡，不计成本）。
+    去掉"事后挑中赢家"的偏差——比起拿 XLK 长持（十五年里恰好封神的板块）当基准，
+    板块等权才是判断"轮动/择时有没有加信息"的公平对照。"""
+    adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
+    if adj.empty:
+        return None
+    daily = adj.pct_change(fill_method=None).mean(axis=1)  # 每日等权（有数据的标的均值）
+    return (initial_cash * (1 + daily.fillna(0.0)).cumprod()).rename("equal_weight")
+
+
 def _render_portfolio_bt(strategy_name: str, params: dict):
     universe = cfg.symbols_for(params.get("groups", []))
     if params.get("universe_file"):
@@ -915,6 +927,12 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
         qqq = prices["QQQ"].loc[start_str:end_str]
         if not qqq.empty:
             benchmarks["QQQ长持"] = hold_equity(price_series(qqq), INITIAL_CASH, cfg.cost_bps)
+    # 纯板块策略（如 momentum）：加板块等权基准。用户观察"板块策略全跑输 XLK 长持"，
+    # 但 XLK 是事后赢家；板块等权才是去掉幸存者偏差、判断轮动有没有加信息的公平对照。
+    if params.get("groups") == ["sectors"]:
+        ew = equal_weight_equity(window_prices, INITIAL_CASH)
+        if ew is not None:
+            benchmarks["板块等权"] = ew
     if strategy_name == "stock_momentum":
         # 池子等权：与策略共享同一候选超集，是判断"排名有没有加信息"的最干净对照
         pools = strat.monthly_pools(
