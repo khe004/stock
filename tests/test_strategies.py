@@ -66,31 +66,102 @@ def test_rsi_sell_after_overbought_pullback():
 
 @pytest.fixture
 def rotation_prices():
-    n = 100
-    steady = 100 * 1.005 ** np.arange(n)          # A: 全程缓涨
-    late = np.concatenate([                        # B: 前 70 天横盘，后 30 天加速
-        np.full(70, 100.0), 100 * 1.02 ** np.arange(1, 31),
-    ])
+    """构造 12-1 月度动量轮动测试数据：需要足够长的历史覆盖 252+21 日回看窗口。
+
+    A: 全程强势上涨（12-1 动量最高）
+    B: 全程中等上涨（12-1 动量中等）
+    C: 横盘（12-1 动量约为零）
+    D: 缓慢下跌（12-1 动量为负）
+    """
+    n = 350  # 需要 252+21=273 日窗口 + 至少几个月度调仓点
+    a = 100 * 1.004 ** np.arange(n)   # 日涨 0.4%，年化极强
+    b = 100 * 1.002 ** np.arange(n)   # 日涨 0.2%，年化中等
+    c = np.full(n, 100.0)             # 横盘
+    d = 100 * 0.999 ** np.arange(n)   # 缓跌
     return {
-        "A": make_df(steady),
-        "B": make_df(late),
-        "C": make_df(np.full(n, 100.0)),
-        "D": make_df(np.full(n, 100.0)),
+        "A": make_df_start(a, start="2023-01-02"),
+        "B": make_df_start(b, start="2023-01-02"),
+        "C": make_df_start(c, start="2023-01-02"),
+        "D": make_df_start(d, start="2023-01-02"),
     }
 
 
-def test_momentum_rotation(rotation_prices):
-    signals = Momentum(lookback_days=20, top_n=1).generate(rotation_prices)
-    b_buys = [s for s in signals if s.symbol == "B" and s.direction == BUY]
-    a_sells = [s for s in signals if s.symbol == "A" and s.direction == SELL]
-    assert b_buys, "B 加速后应进入动量榜首，产生买入信号"
-    assert pd.Timestamp(b_buys[0].date) > rotation_prices["B"].index[70]
-    assert a_sells, "A 被 B 挤出榜首后应产生卖出信号"
+def test_momentum_monthly_rotation(rotation_prices):
+    """12-1 月度动量：应在月度调仓日选中动量最强的 top_n 板块。"""
+    signals = Momentum(lookback_days=60, skip_days=5, top_n=2).generate(rotation_prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "应有买入信号"
+    # A 和 B 动量最强，应被选中
+    bought = {s.symbol for s in buys}
+    assert "A" in bought, "动量最强的 A 应被选中"
+    assert "B" in bought, "动量次强的 B 应被选中"
+    # 横盘和下跌的不应被选中
+    assert "C" not in bought or "D" not in bought, "横盘/下跌的标的不应同时被选中"
+    # 验证信号日期在月首（月度调仓）
+    buy_dates = [pd.Timestamp(s.date) for s in buys]
+    for d in buy_dates:
+        # 每个买入日应是当月首个交易日（即它的日期应在当月前5个交易日内）
+        assert d.day <= 7, f"买入信号应在月初，实际日期 {d}"
+
+
+def test_momentum_12_1_formula(rotation_prices):
+    """验证 12-1 动量口径：选中的是 shift(skip)/shift(lookback)-1 最高的标的。"""
+    signals = Momentum(lookback_days=60, skip_days=5, top_n=1).generate(rotation_prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "应有买入信号"
+    # top_n=1 时应只选 A（动量最强）
+    assert all(s.symbol == "A" for s in buys), "top_n=1 应全部选中动量最强的 A"
+
+
+def test_momentum_sell_on_exit(rotation_prices):
+    """跌出前 top_n 时应有 SELL 信号。"""
+    # 让 A 前半段强、后半段弱，测试调出
+    prices = dict(rotation_prices)
+    n = 350
+    # A 先涨后跌
+    a_up = 100 * 1.004 ** np.arange(200)
+    a_down = a_up[-1] * 0.998 ** np.arange(150)
+    prices["A"] = make_df_start(np.concatenate([a_up, a_down]), start="2023-01-02")
+
+    signals = Momentum(lookback_days=60, skip_days=5, top_n=2).generate(prices)
+    sells = [s for s in signals if s.symbol == "A" and s.direction == SELL]
+    assert sells, "A 动量转弱后应有卖出信号"
+
+
+def test_momentum_reason_has_values(rotation_prices):
+    """reason 必须含 12-1 动量数值和排名。"""
+    signals = Momentum(lookback_days=60, skip_days=5, top_n=2).generate(rotation_prices)
+    assert signals, "应有信号"
+    for s in signals:
+        assert "12-1 动量" in s.reason, f"reason 应含'12-1 动量'：{s.reason}"
+        assert "%" in s.reason, f"reason 应含百分比数值：{s.reason}"
+        assert "名" in s.reason, f"reason 应含排名：{s.reason}"
+
+
+def test_momentum_strength_in_range(rotation_prices):
+    """strength 应在 (0, 1] 范围。"""
+    signals = Momentum(lookback_days=60, skip_days=5, top_n=2).generate(rotation_prices)
+    assert signals, "应有信号"
+    for s in signals:
+        assert 0 < s.strength <= 1, f"strength 应在 (0, 1]：{s.strength}"
+
+
+def test_momentum_no_signal_when_window_insufficient():
+    """窗口不足（shift 后 NaN）时不发信号。"""
+    # 只给 30 天数据，lookback=252 不够
+    short = {
+        "A": make_df(np.linspace(100, 130, 30)),
+        "B": make_df(np.linspace(100, 120, 30)),
+        "C": make_df(np.linspace(100, 110, 30)),
+        "D": make_df(np.linspace(100, 105, 30)),
+    }
+    signals = Momentum(lookback_days=252, skip_days=21, top_n=2).generate(short)
+    assert signals == [], "数据不足窗口时不应发信号"
 
 
 def test_momentum_needs_enough_symbols(rotation_prices):
     two = {k: rotation_prices[k] for k in ["A", "B"]}
-    assert Momentum(lookback_days=20, top_n=3).generate(two) == []
+    assert Momentum(lookback_days=60, skip_days=5, top_n=3).generate(two) == []
 
 
 def make_df_start(closes, start="2024-01-01"):

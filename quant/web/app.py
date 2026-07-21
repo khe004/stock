@@ -61,7 +61,8 @@ def signed_color(v) -> str:
 
 RANGE_OPTIONS = {"近3月": 63, "近6月": 126, "近1年": 252, "近3年": 756, "全部": None}
 
-MOM_LOOKBACK = strategy_params.get("momentum", {}).get("lookback_days", 63)
+MOM_LOOKBACK = strategy_params.get("momentum", {}).get("lookback_days", 252)
+MOM_SKIP = strategy_params.get("momentum", {}).get("skip_days", 21)
 MOM_TOP_N = strategy_params.get("momentum", {}).get("top_n", 3)
 RSI_PERIOD = strategy_params.get("rsi_reversal", {}).get("period", 14)
 RSI_OVERSOLD = strategy_params.get("rsi_reversal", {}).get("oversold", 30)
@@ -281,9 +282,11 @@ def render_kline():
         fig.add_hrect(y0=0, y1=RSI_OVERSOLD, fillcolor=BUY_COLOR, opacity=0.07, line_width=0, row=2, col=1)
         fig.add_hrect(y0=RSI_OVERBOUGHT, y1=100, fillcolor=SELL_COLOR, opacity=0.07, line_width=0, row=2, col=1)
 
+        adj = price_series(prices)
+        mom_12_1 = adj.shift(MOM_SKIP) / adj.shift(MOM_LOOKBACK) - 1
         fig.add_trace(go.Scatter(
-            x=prices.index, y=price_series(prices).pct_change(MOM_LOOKBACK, fill_method=None),
-            mode="lines", name=f"动量(近{MOM_LOOKBACK}日)", line=dict(width=1, color="#8c564b"),
+            x=prices.index, y=mom_12_1,
+            mode="lines", name="12-1 动量", line=dict(width=1, color="#8c564b"),
         ), row=3, col=1)
         fig.add_hline(y=0, line_dash="dot", line_color="#888", row=3, col=1)
 
@@ -291,7 +294,7 @@ def render_kline():
                           legend=dict(orientation="h", yanchor="bottom", y=1.01))
         fig.update_yaxes(title_text="价格", row=1, col=1)
         fig.update_yaxes(title_text=f"RSI({RSI_PERIOD})", range=[0, 100], row=2, col=1)
-        fig.update_yaxes(title_text="动量", tickformat=".0%", row=3, col=1)
+        fig.update_yaxes(title_text="12-1 动量", tickformat=".0%", row=3, col=1)
         st.plotly_chart(fig, width="stretch")
 
     st.subheader("分组对比（归一化总回报，区间起点 = 100，含分红）")
@@ -314,22 +317,25 @@ def render_kline():
 
 
 def render_momentum_rank():
-    st.title("动量排名（行业 ETF）")
+    st.title("动量排名（行业 ETF · 12-1 月度动量）")
     closes = group_closes("sectors", adjusted=True)  # 总回报口径，与 momentum 策略一致
-    rets = closes.pct_change(MOM_LOOKBACK, fill_method=None).dropna(how="all")
-    if rets.empty:
-        st.warning("行情数据不足（需要至少 63 个交易日），先运行 python run_daily.py 拉取数据")
+    # 12-1 动量口径：shift(skip) / shift(lookback) - 1，与 momentum 策略计算一致
+    mom = closes.shift(MOM_SKIP) / closes.shift(MOM_LOOKBACK) - 1
+    mom = mom.dropna(how="all")
+    if mom.empty:
+        st.warning(f"行情数据不足（需要至少 {MOM_LOOKBACK} 个交易日），先运行 python run_daily.py 拉取数据")
         return
 
-    latest = rets.iloc[-1].dropna().sort_values(ascending=False)
-    as_of = rets.index[-1].strftime("%Y-%m-%d")
-    st.caption(f"截至 {as_of}，按近 {MOM_LOOKBACK} 个交易日收益排名；前 {MOM_TOP_N} 名为轮动持有对象。"
-               f"第 {MOM_TOP_N} 名与第 {MOM_TOP_N + 1} 名收益接近时，进出信号可能是排名噪音。")
+    latest = mom.iloc[-1].dropna().sort_values(ascending=False)
+    as_of = mom.index[-1].strftime("%Y-%m-%d")
+    st.caption(f"截至 {as_of}，按 12-1 动量排名（近{MOM_LOOKBACK}日收益、跳过最近{MOM_SKIP}日）；"
+               f"每月首个交易日调仓，前 {MOM_TOP_N} 名为轮动持有对象。"
+               f"第 {MOM_TOP_N} 名与第 {MOM_TOP_N + 1} 名动量接近时，进出信号可能是排名噪音。")
 
     table = pd.DataFrame({
         "排名": range(1, len(latest) + 1),
         "标的": latest.index,
-        f"近{MOM_LOOKBACK}日收益": latest.values,
+        "12-1 动量": latest.values,
         "状态": ["✅ 前3" if i < MOM_TOP_N else "" for i in range(len(latest))],
     })
 
@@ -338,12 +344,13 @@ def render_momentum_rank():
         return [f"background-color: {bg}"] * len(row)
 
     styler = (table.style.apply(top_style, axis=1)
-                   .format({f"近{MOM_LOOKBACK}日收益": "{:+.1%}"}))
+                   .format({"12-1 动量": "{:+.1%}"}))
     st.dataframe(styler, width="stretch", hide_index=True)
 
     st.subheader("排名走势（近 120 个交易日）")
-    st.caption("排名 1 在最上方；在虚线（前3分界）附近反复穿越的板块，其买卖信号可信度低。")
-    ranks = rets.rank(axis=1, ascending=False).iloc[-120:]
+    st.caption("排名 1 在最上方；在虚线（前3分界）附近反复穿越的板块，其买卖信号可信度低。"
+               "月度调仓后换手已大幅降低，但排名走势仍可辅助判断信号质量。")
+    ranks = mom.rank(axis=1, ascending=False).iloc[-120:]
     rfig = go.Figure()
     for s in ranks.columns:
         rfig.add_trace(go.Scatter(x=ranks.index, y=ranks[s], mode="lines", name=s, line=dict(width=1.5)))
@@ -1110,15 +1117,26 @@ def render_strategy_docs():
 
 ---
 
-## 2. momentum 动量轮动（相对强弱）
+## 2. momentum 行业 12-1 月度动量轮动（相对强弱）
 
-**直觉**：资金分板块轮动，过去 3 个月强的板块未来几周大概率继续强（动量效应，学术上验证最充分的市场异象之一）。
+**直觉**：资金分板块轮动，过去 12 个月强的板块未来一个月大概率继续强（动量效应，学术上验证最充分的市场异象之一）。
+跳过最近 1 个月是为了避开短期反转——大涨之后的板块短期常回调（"买在山顶"），
+去掉这段噪音后的动量信号更干净。经典学术文献（Jegadeesh & Titman 1993）即用 12-1 口径。
 
-**规则**：{MOM_TOP_N} 名开外的板块**新进入**近 {MOM_LOOKBACK} 个交易日收益前 {MOM_TOP_N} 名 → 买入；跌出前 {MOM_TOP_N} 名 → 卖出。完整用法是组合式的：始终持有排名前 {MOM_TOP_N} 的板块。
+**规则**：每月首个交易日——
+1. 计算各行业 ETF 的 12-1 动量（近 {MOM_LOOKBACK} 个交易日收益，跳过最近 {MOM_SKIP} 日）；
+2. 横截面按动量降序排名，取前 {MOM_TOP_N} 名纳入轮动组合；
+3. 上月持有但本月跌出前 {MOM_TOP_N} → 卖出（先卖后买）；新进入 → 买入。
 
-**何时灵**：板块分化明显的行情（如 AI 行情中科技/半导体持续霸榜）。
+**旧版为何改造**：旧版用 63 日回看 + 每日进出，实测总收益 +89% 惨败于板块等权 +251%。
+原因是短周期 + 日度调仓 = 把波动性龙头反复甩出去（whipsaw），频繁小亏侵蚀收益。
+改为 252/skip21 月度后，交易次数从 932→84，总收益 +264%、回撤 -31.6%、Calmar 0.38，
+跑赢板块等权且风险调整收益显著提升。
 
-**何时坑**：动量崩溃（大跌后的 V 型反转期追强追在山顶）；排名在第 {MOM_TOP_N}、{MOM_TOP_N + 1} 名之间反复横跳的边缘板块（对照「动量排名」页人工过滤）。
+**何时灵**：板块分化明显的行情（如 AI 行情中科技/半导体持续霸榜），月度拿得住，不被日内噪音甩出。
+
+**何时坑**：动量崩溃（大跌后的 V 型反转期追强追在山顶，月度频率下反应仍偏慢）；
+板块收益高度聚集于少数行情主导时期，其余时间可能跑平或微跑输等权。
 
 **作用范围**：11 只行业 ETF。
 

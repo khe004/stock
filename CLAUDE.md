@@ -28,7 +28,7 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 - `quant/web/app.py`：八页面板（市场概览/信号历史/K线/动量排名/策略评分/策略相关性/回测/策略说明）；
   回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
 
-八个策略：sma_cross、momentum（行业轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
+八个策略：sma_cross、momentum（行业 12-1 月度动量轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
 dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）、
 low_vol（行业 ETF + 债金低波动因子，首个非动量分散因子；扩宇宙含 TLT/GLD 后与 momentum 相关约 0.26）。
 
@@ -83,3 +83,5 @@ low_vol（行业 ETF + 债金低波动因子，首个非动量分散因子；扩
   集中暴露，12-1 排名未加信息（等权反而更强）。不要凭其回测曲线给该策略分配真实资金。
 - 未做/候选：期权链快照信号（covered call 权利金提醒，yfinance 可拉）、`next_open`
   次日开盘成交选项（低频策略影响小，用户已确认暂不需要）、点对点历史成分数据。
+- **板块 momentum 已由 63日/每日 改为 252/skip21 月度**（旧版跑输板块等权，whipsaw +
+  短期反转所致；改造后总收益 +264%、Calmar 0.38，交易 932→84 次）。

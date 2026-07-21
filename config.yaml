@@ -53,9 +53,10 @@ strategies:
     fast: 20
     slow: 60
     groups: [broad, themes, assets]
-  momentum:
-    enabled: true
-    lookback_days: 63   # 约 3 个月
+  momentum:               # 行业 12-1 月度动量轮动：旧版（63日/每日进出）whipsaw 严重，
+    enabled: true         # 短期反转频繁买在山顶，实测跑输板块等权；改为 12-1 月度拿得更稳
+    lookback_days: 252    # 动量回看约 12 个月
+    skip_days: 21         # 跳过最近约 1 个月（12-1 口径，避开短期反转买在山顶）
     top_n: 3
     groups: [sectors]
   rsi_reversal:
