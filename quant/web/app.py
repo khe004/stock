@@ -869,7 +869,8 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     end_str = bench_window.index[-1].strftime("%Y-%m-%d")
     st.caption(f"组合轮动模式：资金始终在场内换仓，区间起点按区间之前的信号还原应有持仓。"
                f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。"
-               f"基准为 {bench_symbol} 一次性长持（资金时间敞口一致才可比；定投基准只在智能定投模式提供）。")
+               f"基准为一次性长持对照（{bench_symbol}，宇宙含 QQQ 时另加 QQQ 长持；"
+               f"资金时间敞口一致才可比；定投基准只在智能定投模式提供）。")
 
     if params.get("universe_file"):
         excluded = st.multiselect(
@@ -908,6 +909,12 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     strategy_total = equity_metrics(result.equity, INITIAL_CASH)["total_return"]
 
     benchmarks: dict[str, pd.Series] = {f"{bench_symbol}长持": hold}
+    # QQQ 长持基准：宇宙含 QQQ 且非主基准时补上。如 dual_momentum 在 SPY/QQQ/TLT 间
+    # 来回切，QQQ 2015-2024 极强，需看策略是否真跑赢 QQQ 长持——暴露出来更诚实。
+    if "QQQ" in prices and bench_symbol != "QQQ":
+        qqq = prices["QQQ"].loc[start_str:end_str]
+        if not qqq.empty:
+            benchmarks["QQQ长持"] = hold_equity(price_series(qqq), INITIAL_CASH, cfg.cost_bps)
     if strategy_name == "stock_momentum":
         # 池子等权：与策略共享同一候选超集，是判断"排名有没有加信息"的最干净对照
         pools = strat.monthly_pools(
@@ -915,10 +922,6 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
         pool_ew = pool_equal_weight_equity(window_prices, pools, INITIAL_CASH)
         if pool_ew is not None:
             benchmarks["池子等权"] = pool_ew
-        if "QQQ" in prices:
-            qqq = prices["QQQ"].loc[start_str:end_str]
-            if not qqq.empty:
-                benchmarks["QQQ长持"] = hold_equity(price_series(qqq), INITIAL_CASH, cfg.cost_bps)
 
     excess_chips(strategy_total, {
         name: float(eq_.iloc[-1]) / INITIAL_CASH - 1 for name, eq_ in benchmarks.items()
