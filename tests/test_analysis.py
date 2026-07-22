@@ -116,3 +116,48 @@ def test_summarize_scores_groups_and_flags_low_sample():
 
 def test_summarize_scores_empty():
     assert summarize_scores(pd.DataFrame()).empty
+
+
+# ── screening 市场筛选 ──────────────────────────────────────────
+
+from quant.analysis.screening import compute_strength, market_regime  # noqa: E402
+
+
+def test_compute_strength_ranks_strongest_first():
+    """强势标的（持续上涨、临近高点、站上均线）综合分应最高、排在最前。"""
+    n = 300
+    strong = make_df(np.linspace(100, 300, n))          # 持续大涨
+    weak = make_df(np.linspace(200, 100, n))            # 持续下跌
+    flat = make_df(100 + np.zeros(n) + np.linspace(0, 5, n))  # 基本走平微涨
+    df = compute_strength({"STRONG": strong, "WEAK": weak, "FLAT": flat})
+    assert list(df.index)[0] == "STRONG", "最强标的应排第一"
+    assert df.index[-1] == "WEAK", "最弱标的应垫底"
+    # 综合分在 [0,1]
+    assert (df["composite"] >= 0).all() and (df["composite"] <= 1).all()
+    # 强势标的：动量为正、站上均线
+    assert df.loc["STRONG", "mom"] > 0
+    assert bool(df.loc["STRONG", "above_ma"])
+    assert not bool(df.loc["WEAK", "above_ma"])
+
+
+def test_compute_strength_skips_short_history():
+    """历史不足 lookback+1 的标的被跳过。"""
+    short = make_df(np.linspace(100, 120, 50))   # 只有 50 天
+    long = make_df(np.linspace(100, 200, 300))
+    df = compute_strength({"SHORT": short, "LONG": long})
+    assert "SHORT" not in df.index
+    assert "LONG" in df.index
+
+
+def test_compute_strength_empty():
+    assert compute_strength({}).empty
+
+
+def test_market_regime_detects_trend():
+    up = make_df(np.linspace(100, 200, 300))
+    down = make_df(np.linspace(200, 100, 300))
+    assert market_regime(up)["risk_on"] is True
+    assert market_regime(up)["dist"] > 0
+    assert market_regime(down)["risk_on"] is False
+    # 数据不足返回 None
+    assert market_regime(make_df(np.linspace(100, 110, 50)))["risk_on"] is None
