@@ -21,7 +21,8 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 - `quant/data/`：yfinance 增量拉取（首拉空表报错）、SQLite（prices/signals 两表）
 - `quant/strategies/`：基类 `generate(prices: dict[symbol, df]) -> list[Signal]`，对**全量历史**出信号；
   每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY
-- `quant/backtest/engine.py`：单标的、组合轮动（同日先卖后买、资金不出场）、智能定投三种模拟
+- `quant/backtest/engine.py`：单标的、组合轮动（同日先卖后买、资金不出场）、智能定投三种模拟；
+  `vol_scaled_equity` 纯函数（无杠杆波动率缩放，降回撤/尾部，实测不提升夏普；仅分析用不改实盘信号）
 - `quant/analysis/`：market.py（52周区间位置/行业宽度/收益率利差，纯计算给市场概览页用）、
   scoring.py（signal_forward_returns 逐信号算 5/20/60 日前瞻收益，给策略评分页用）、
   correlation.py（策略相关性/组合诊断：各策略权益曲线转日收益率→Pearson相关矩阵→等权组合分散效果）
@@ -85,3 +86,5 @@ low_vol（行业 ETF + 债金低波动因子，首个非动量分散因子；扩
   次日开盘成交选项（低频策略影响小，用户已确认暂不需要）、点对点历史成分数据。
 - **板块 momentum 已由 63日/每日 改为 252/skip21 月度**（旧版跑输板块等权，whipsaw +
   短期反转所致；改造后总收益 +264%、Calmar 0.38，交易 932→84 次）。
+- **回测页有可选「波动率缩放」开关**（无杠杆减仓，降回撤/尾部，实测不提升夏普；仅分析用
+  不改实盘信号）。用户可调目标波动率与回看窗口；cap=1.0 只减仓不加杠杆（实测加杠杆有害）。

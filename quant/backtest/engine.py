@@ -61,6 +61,50 @@ def dca_equity(px: pd.Series, initial_cash: float = 10_000.0, cost_bps: float = 
     return pd.Series(values, index=px.index, name="dca")
 
 
+def vol_scaled_equity(
+    equity: pd.Series,
+    target_vol: float = 0.15,
+    vol_window: int = 63,
+    cap: float = 1.0,
+    initial_cash: float = 10_000.0,
+) -> tuple[pd.Series, pd.Series]:
+    """波动率缩放权益曲线：按近期已实现波动率的倒数调整仓位，高波降仓、低波满仓。
+
+    用途定位（实验验证）：
+    - 它是【回撤/尾部缩减器】——降低最大回撤与最差单日（如 momentum 回撤
+      -31.6%→-21.1%、最差单日 -10.6%→-6.1%），代价是收益略降、夏普基本打平。
+    - **不是**夏普放大器：缩放后年化波动率降低，夏普比率通常不变或微降。
+    - 仅用于分析（回测页可选开关），不改动实盘信号生成。
+
+    前视安全：
+    - realized = rolling(vol_window).std().shift(1) × √252
+    - t 日仓位权重只用截至 t-1 的已实现波动率，不含当日信息。
+
+    参数含义：
+    - target_vol：目标年化波动率，决定平均仓位水平。0.15 → 当已实现波动率
+      恰好 15% 时满仓（w=1），波动更高时减仓。
+    - vol_window：回看窗口（交易日），默认 63（约 3 个月）。
+    - cap：仓位上限，默认 1.0（只减仓不加杠杆）。实测 cap>1 加杠杆反而有害
+      （波动放大抵消收益，回撤恶化），所以默认限制为不超过满仓。
+    - initial_cash：起始金额，用于从缩放后日收益还原权益曲线。
+
+    返回：
+    - (scaled_equity, weights)：缩放后权益曲线与每日仓位权重序列。
+      窗口不足期（前 vol_window 日）权重为 0、收益为 0（持现金）。
+    """
+    r = equity.pct_change().fillna(0.0)
+    # 近期已实现波动率（年化），shift(1) 保证前视安全
+    realized = r.rolling(vol_window).std().shift(1) * math.sqrt(TRADING_DAYS)
+    # 目标仓位权重：波动越高→仓位越低；clip 到 [0, cap]
+    w = (target_vol / realized).clip(lower=0.0, upper=cap).fillna(0.0)
+    # 缩放后日收益 & 还原权益曲线
+    scaled_r = w * r
+    scaled_equity = initial_cash * (1 + scaled_r).cumprod()
+    scaled_equity.name = "vol_scaled"
+    w.name = "vol_weight"
+    return scaled_equity, w
+
+
 @dataclass
 class BacktestResult:
     symbol: str

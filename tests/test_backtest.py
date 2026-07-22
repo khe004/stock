@@ -9,6 +9,7 @@ from quant.backtest.engine import (
     run_backtest,
     run_portfolio_backtest,
     run_smart_dca_backtest,
+    vol_scaled_equity,
 )
 from quant.strategies.base import BUY, SELL, Signal
 
@@ -166,3 +167,76 @@ def test_smart_dca_pauses_and_topups():
     assert result.paused_spans, "应记录暂停区段"
     # 资金守恒：期末权益为正且全部资金已入账
     assert result.equity.iloc[-1] > 0
+
+
+# ── vol_scaled_equity 测试 ──────────────────────────────────────
+
+def test_vol_scaled_look_ahead_safe():
+    """前视安全：某日权重只依赖之前的波动——构造分段波动序列，
+    高波动段之后的权重应下降。"""
+    # 中等波动 100 天 → 高波动 100 天
+    rng = np.random.default_rng(42)
+    med_vol = 100 + np.cumsum(rng.normal(0, 0.01, 100))   # ~1% 日波动（年化 ~16%）
+    high_vol = med_vol[-1] + np.cumsum(rng.normal(0, 0.04, 100))  # ~4% 日波动（年化 ~63%）
+    prices = np.concatenate([med_vol, high_vol])
+    idx = pd.bdate_range("2023-01-01", periods=len(prices))
+    equity = pd.Series(prices, index=idx)
+
+    # cap 设很大确保不截断，纯测波动率驱动
+    _, weights = vol_scaled_equity(equity, vol_window=20, target_vol=0.15, cap=100.0)
+
+    # 窗口 20 天、shift(1) → 前 20 个位置权重为 0（无波动率估计）
+    assert (weights.iloc[:20] == 0).all(), "窗口不足期权重应为 0"
+    # 高波动段开始后（第 100 天之后），权重应下降
+    late_med_vol_w = float(weights.iloc[90])   # 中等波动段尾部
+    in_high_vol_w = float(weights.iloc[140])   # 高波动段已充分进入窗口
+    assert in_high_vol_w < late_med_vol_w, "高波动段后权重应降低"
+
+
+def test_vol_scaled_cap_enforced():
+    """cap=1.0 时权重不超过 1.0。"""
+    # 非常低的波动率 → target_vol / realized 会很大，但应被 cap 截断
+    prices = np.linspace(100, 101, 200)  # 极低波动的线性上涨
+    idx = pd.bdate_range("2023-01-01", periods=200)
+    equity = pd.Series(prices, index=idx)
+
+    _, weights = vol_scaled_equity(equity, target_vol=0.15, cap=1.0)
+    assert (weights <= 1.0 + 1e-10).all(), "权重不应超过 cap=1.0"
+    # 低波动时权重应等于 cap（被截断）
+    active = weights[weights > 0]
+    assert float(active.min()) == pytest.approx(1.0), "低波动时权重应等于 cap"
+
+
+def test_vol_scaled_reduces_volatility():
+    """缩放后已实现波动率 ≤ 原始（在有波动变化的合成序列上）。"""
+    rng = np.random.default_rng(123)
+    # 混合波动：低→高→低
+    segment1 = 100 + np.cumsum(rng.normal(0, 0.005, 100))
+    segment2 = segment1[-1] + np.cumsum(rng.normal(0, 0.03, 100))
+    segment3 = segment2[-1] + np.cumsum(rng.normal(0, 0.005, 100))
+    prices = np.concatenate([segment1, segment2, segment3])
+    idx = pd.bdate_range("2022-01-01", periods=len(prices))
+    equity = pd.Series(prices, index=idx)
+
+    scaled, _ = vol_scaled_equity(equity, target_vol=0.15, vol_window=20)
+    orig_vol = float(equity.pct_change().dropna().std())
+    scaled_vol = float(scaled.pct_change().dropna().std())
+    assert scaled_vol <= orig_vol * 1.01, (
+        f"缩放后波动率 {scaled_vol:.4f} 不应高于原始 {orig_vol:.4f}"
+    )
+
+
+def test_vol_scaled_nan_window_no_error():
+    """窗口不足（NaN）时收益为 0、不报错。"""
+    # 很短的序列，短于 vol_window
+    prices = np.linspace(100, 110, 30)
+    idx = pd.bdate_range("2024-01-01", periods=30)
+    equity = pd.Series(prices, index=idx)
+
+    scaled, weights = vol_scaled_equity(equity, vol_window=63)  # 窗口 > 数据长度
+    assert len(scaled) == 30
+    assert not scaled.isna().any(), "不应有 NaN"
+    # 所有权重为 0（窗口不足 + shift(1)）
+    assert (weights == 0).all()
+    # 缩放后权益曲线应为平线（收益为 0）
+    assert scaled.iloc[-1] == pytest.approx(10_000.0)
