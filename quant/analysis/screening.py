@@ -1,14 +1,20 @@
 """市场筛选页的纯计算：个股/板块当前强弱快照。不含 UI。
 
-对每个标的算三个"强弱"维度，再横截面合成综合分：
-- 12-1 动量：近 lookback 日收益但跳过最近 skip 日（避短期反转），衡量中长期趋势强度
-- 52 周区间位置：现价在过去 range_window 日 [低,高] 区间的位置（0~1，越高越强）
-- 距均线：现价相对 ma 日均线的偏离（正=站上均线，趋势向上）
-综合分 = 三维【横截面百分位排名】的等权平均——刻意简单透明，不做权重优化
-（避免过拟合；权重一旦去拟合历史就落入 stock_momentum 那类陷阱）。
+多因子综合分 = 【动量分 · 50% + 价值分 · 50%】（提供 fundamentals 时；否则退化为纯动量分）：
 
-口径提醒：这是【当前快照】，非回测；个股宇宙是今天的成分快照，含幸存者偏差；
-12-1 动量买的是已涨完的强者，短期有反转/买在山顶风险，仅作强弱参考不构成建议。
+- 动量分 = 三个趋势维度【横截面百分位排名】的等权平均：
+  - 12-1 动量：近 lookback 日收益但跳过最近 skip 日（避短期反转），中长期趋势强度
+  - 52 周区间位置：现价在过去 range_window 日 [低,高] 区间的位置（0~1，越高越强）
+  - 距均线：现价相对 ma 日均线的偏离（正=站上均线，趋势向上）
+- 价值分 = 盈利收益率 E/P（= 1/trailing_pe，仅正盈利）的横截面百分位（越便宜越高）。
+  负盈利/无 P/E 的标的价值分缺失，其综合分退回只用动量分（不倒扣）。
+
+动量与价值理念相反（动量买贵的赢家、价值买便宜的），50/50 融合是刻意的多因子折中；
+各维仍用百分位等权、不做权重优化（避免落入 stock_momentum 那类过拟合陷阱）。
+
+口径提醒：这是【当前快照】，非回测；价值用当前基本面快照（yfinance 现值，非
+point-in-time 历史，无法回测）；个股宇宙是今天的成分快照含幸存者偏差；12-1 动量
+买的是已涨完的强者，短期有反转/买在山顶风险。仅作强弱参考，不构成交易建议。
 """
 
 import pandas as pd
@@ -21,6 +27,7 @@ STRENGTH_DIMS = ("mom", "pos_52w", "dist_ma")
 
 def compute_strength(
     prices: dict[str, pd.DataFrame],
+    fundamentals: pd.DataFrame | None = None,
     lookback: int = 252,
     skip: int = 21,
     ma: int = 200,
@@ -28,9 +35,15 @@ def compute_strength(
 ) -> pd.DataFrame:
     """为每个标的算强弱快照（截至各自最新一日）。
 
+    参数：
+        prices: symbol -> 日线 DataFrame。
+        fundamentals: 可选，索引=symbol、含 trailing_pe 列的当前基本面快照。
+            提供时综合分融入价值分（动量半+价值半）；否则综合分为纯动量分。
+
     返回 DataFrame（索引=symbol，按综合分降序），列：
-    mom（12-1 动量）、pos_52w（52周位置 0~1）、dist_ma（距均线偏离）、
-    above_ma（是否站上均线）、composite（综合分 0~1，横截面百分位均值）。
+    mom（12-1动量）、pos_52w（52周位置 0~1）、dist_ma（距均线偏离）、above_ma、
+    trend_score（动量分 0~1）、composite（综合分 0~1）；提供 fundamentals 时另有
+    pe（trailing PE）、earn_yield（盈利收益率）、value_score（价值分 0~1）。
     历史不足 lookback+1 日的标的被跳过。
     """
     adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
@@ -50,9 +63,28 @@ def compute_strength(
     if not records:
         return pd.DataFrame()
     df = pd.DataFrame(records).set_index("symbol")
-    # 横截面百分位排名合成综合分（三维等权，缺失维度按可用维度平均）
-    ranks = pd.concat([df[c].rank(pct=True) for c in STRENGTH_DIMS], axis=1)
-    df["composite"] = ranks.mean(axis=1)
+
+    # 动量分：三维趋势的横截面百分位等权平均
+    trend = pd.concat([df[c].rank(pct=True) for c in STRENGTH_DIMS], axis=1).mean(axis=1)
+    df["trend_score"] = trend
+
+    # 价值维度：盈利收益率 E/P = 1/trailing_pe（仅正盈利）
+    has_value = (
+        fundamentals is not None
+        and "trailing_pe" in fundamentals.columns
+        and fundamentals["trailing_pe"].reindex(df.index).where(lambda s: s > 0).notna().any()
+    )
+    if has_value:
+        pe = pd.to_numeric(fundamentals["trailing_pe"].reindex(df.index), errors="coerce")
+        df["pe"] = pe
+        df["earn_yield"] = (1.0 / pe.where(pe > 0))  # 负盈利/无PE → NaN
+        value = df["earn_yield"].rank(pct=True)
+        df["value_score"] = value
+        # 动量半 + 价值半；价值缺失（无PE）的标的按 skipna 退回只用动量分
+        df["composite"] = pd.concat([trend, value], axis=1).mean(axis=1)
+    else:
+        df["composite"] = trend
+
     return df.sort_values("composite", ascending=False)
 
 

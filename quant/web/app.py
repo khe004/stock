@@ -1364,30 +1364,44 @@ def _stock_sector_map() -> dict[str, str]:
 
 
 def _render_strength_table(df: pd.DataFrame, label_map: dict | None = None):
-    """渲染强弱表：12-1动量/52周位置/距200MA/综合分，明暗主题下前景色随正负切换。"""
+    """渲染强弱表：12-1动量/52周位置/距200MA/(P/E)/综合分，前景色随正负切换。
+    含 pe 列（个股）时展示 P/E；板块无基本面则不显示该列。"""
     d = df.copy()
     d.insert(0, "标的", [
         f"{s}｜{label_map[s]}" if label_map and s in label_map else s for s in d.index
     ])
-    cols = ["标的"] + (["行业"] if "行业" in d.columns else []) + \
-        ["mom", "pos_52w", "dist_ma", "composite"]
+    cols = ["标的"] + (["行业"] if "行业" in d.columns else []) + ["mom", "pos_52w", "dist_ma"]
+    if "pe" in d.columns:
+        cols.append("pe")
+    cols.append("composite")
     show = d[cols].rename(columns={
-        "mom": "12-1动量", "pos_52w": "52周位置", "dist_ma": "距200MA", "composite": "综合分",
+        "mom": "12-1动量", "pos_52w": "52周位置", "dist_ma": "距200MA",
+        "pe": "P/E", "composite": "综合分",
     })
+    fmt = {"12-1动量": "{:+.1%}", "52周位置": "{:.0%}", "距200MA": "{:+.1%}", "综合分": "{:.0%}"}
+    if "P/E" in show.columns:
+        fmt["P/E"] = "{:.1f}"
     styler = (show.style
-              .map(signed_color, subset=["12-1动量", "距200MA"])
-              .format({"12-1动量": "{:+.1%}", "52周位置": "{:.0%}",
-                       "距200MA": "{:+.1%}", "综合分": "{:.0%}"}, na_rep="—"))
+              .map(signed_color, subset=[c for c in ["12-1动量", "距200MA"] if c in show.columns])
+              .format(fmt, na_rep="—"))
     st.dataframe(styler, width="stretch", hide_index=True)
 
 
+def _sort_strength(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """按 col 降序排；缺失该列（如板块表无 earn_yield）时回落到综合分。"""
+    c = col if col in df.columns else "composite"
+    return df.dropna(subset=[c]).sort_values(c, ascending=False)
+
+
 def render_market_screen():
-    """市场筛选：大盘趋势灯 + 板块强弱 + 个股强弱榜 + 透明综合分。"""
+    """市场筛选：大盘趋势灯 + 板块强弱 + 个股强弱榜 + 动量+价值多因子综合分。"""
     st.title("市场筛选")
-    st.caption("当前强弱【快照】（非回测）：综合分 = 12-1动量 / 52周位置 / 距200日均线 三维"
-               "横截面百分位排名的等权平均，刻意简单、不做权重优化（避免过拟合）。"
-               "个股宇宙为今日成分快照含幸存者偏差；12-1 动量买的是已涨完的强者，"
-               "短期有反转/买在山顶风险，仅作强弱参考，不构成交易建议。")
+    st.caption("当前强弱【快照】（非回测）：**综合分 = 动量半 + 价值半**——"
+               "动量分 = 12-1动量 / 52周位置 / 距200日均线 三维横截面百分位均值；"
+               "价值分 = 盈利收益率(1/PE)百分位（越便宜越高，仅个股）。动量买贵的赢家、"
+               "价值买便宜的，50/50 融合是刻意折中；各维等权、不做权重优化（避免过拟合）。"
+               "价值用当前基本面快照（非 point-in-time 历史）；个股宇宙含幸存者偏差；"
+               "12-1 动量有短期反转/买在山顶风险。仅作强弱参考，不构成交易建议。")
 
     # ── 大盘趋势灯 ──
     spy = store.load_prices(conn, "SPY")
@@ -1411,39 +1425,47 @@ def render_market_screen():
                   delta_color="normal" if breadth["above"] * 2 >= breadth["total"] else "inverse")
 
     # ── 排序依据（同时作用于板块表与个股榜）──
-    SORT_OPTIONS = {"综合分": "composite", "12-1动量": "mom",
-                    "52周位置": "pos_52w", "距200日均线": "dist_ma"}
+    SORT_OPTIONS = {"综合分（动量+价值）": "composite", "12-1动量": "mom",
+                    "52周位置": "pos_52w", "距200日均线": "dist_ma",
+                    "盈利收益率（价值·仅个股）": "earn_yield"}
     sort_label = st.selectbox(
         "排序依据", list(SORT_OPTIONS), index=0, key="screen_sort",
-        help="综合分=三维等权融合；选单一维度可看纯榜单（如按 12-1动量 看动量冠军，"
-             "哪怕它已从高点回落）",
+        help="综合分=动量半+价值半；选单一维度可看纯榜单（如 12-1动量 看动量冠军哪怕已回落，"
+             "盈利收益率 看最便宜的价值股）。板块无基本面，选价值维度时板块表回落到综合分。",
     )
     sort_col = SORT_OPTIONS[sort_label]
 
     # ── 板块强弱 ──
     st.subheader("板块强弱")
-    sect_str = compute_strength(sect_prices)
+    sect_str = compute_strength(sect_prices)  # 板块无个股基本面，综合分为纯动量分
     if sect_str.empty:
         st.warning("板块行情不足，先运行 python run_daily.py 拉取数据")
     else:
-        sect_sorted = sect_str.dropna(subset=[sort_col]).sort_values(sort_col, ascending=False)
-        _render_strength_table(sect_sorted, label_map=SECTOR_NAMES)
+        _render_strength_table(_sort_strength(sect_str, sort_col), label_map=SECTOR_NAMES)
 
     # ── 个股强弱榜 ──
     st.subheader("个股强弱榜（S&P500 候选池）")
-    with st.spinner("加载个股行情并计算强弱…"):
+    with st.spinner("加载个股行情与基本面并计算强弱…"):
         stock_syms = cfg.universe_symbols("universe_sp500.yaml")
         stock_prices = {s: store.load_prices(conn, s) for s in stock_syms}
         stock_prices = {s: df for s, df in stock_prices.items() if not df.empty}
-        stock_str = compute_strength(stock_prices)
+        fdf = store.load_fundamentals(conn)
+        latest_fund = (fdf.sort_values("date").groupby("symbol").last()
+                       if not fdf.empty else None)
+        stock_str = compute_strength(stock_prices, fundamentals=latest_fund)
     if stock_str.empty:
         st.warning("个股行情不足（需要至少约 1 年数据）")
         return
     sec_map = _stock_sector_map()
     stock_str["行业"] = [sec_map.get(s, "") for s in stock_str.index]
-    st.caption(f"共 {len(stock_str)} 只个股参与排名（历史足够者），截至各自最新交易日。"
-               f"当前按【{sort_label}】排序。")
-    ranked = stock_str.dropna(subset=[sort_col]).sort_values(sort_col, ascending=False)
+    has_val = "value_score" in stock_str.columns
+    n_pe = int(stock_str["pe"].notna().sum()) if "pe" in stock_str.columns else 0
+    fund_date = str(latest_fund["date"].iloc[0]) if latest_fund is not None and not latest_fund.empty else "无"
+    st.caption(f"共 {len(stock_str)} 只个股参与排名，截至各自最新交易日。当前按【{sort_label}】排序。"
+               + (f"综合分=动量半+价值半；价值用 {fund_date} 基本面快照，{n_pe} 只有有效 P/E"
+                  f"（负盈利者无 P/E、价值分缺失，综合分退回只用动量）。" if has_val
+                  else "（基本面表暂无数据，综合分为纯动量；跑 run_daily 记录基本面后生效。）"))
+    ranked = _sort_strength(stock_str, sort_col)
     n = st.slider("每侧显示数量", 5, 30, 15, key="screen_n")
     col_a, col_b = st.columns(2)
     with col_a:

@@ -153,6 +153,35 @@ def test_compute_strength_empty():
     assert compute_strength({}).empty
 
 
+def test_compute_strength_value_factor():
+    """提供基本面时综合分融入价值分（动量半+价值半）：便宜股价值分更高。"""
+    n = 300
+    # 两只动量相近（都温和上涨），但 A 便宜（低PE=高盈利收益率）、B 贵
+    a_px = make_df(np.linspace(100, 130, n))
+    b_px = make_df(np.linspace(100, 130, n))
+    fund = pd.DataFrame(
+        {"trailing_pe": [8.0, 40.0]}, index=["A", "B"]  # A 便宜、B 贵
+    )
+    df = compute_strength({"A": a_px, "B": b_px}, fundamentals=fund)
+    assert "value_score" in df.columns and "pe" in df.columns
+    assert df.loc["A", "earn_yield"] == pytest.approx(1 / 8.0)
+    # A 更便宜 → 价值分更高 → 综合分更高 → 排在 B 前
+    assert df.loc["A", "value_score"] > df.loc["B", "value_score"]
+    assert list(df.index)[0] == "A"
+
+
+def test_compute_strength_no_pe_falls_back_to_momentum():
+    """负盈利/无 P/E 的标的价值分缺失，综合分退回只用动量分（不倒扣为0）。"""
+    n = 300
+    strong = make_df(np.linspace(100, 300, n))   # 强动量、但无 PE
+    weak = make_df(np.linspace(150, 120, n))     # 弱动量、有便宜 PE
+    fund = pd.DataFrame({"trailing_pe": [None, 8.0]}, index=["STRONG", "WEAK"])
+    df = compute_strength({"STRONG": strong, "WEAK": weak}, fundamentals=fund)
+    # STRONG 无 PE：composite == trend_score（未被价值缺失拖到 0）
+    assert pd.isna(df.loc["STRONG", "earn_yield"])
+    assert df.loc["STRONG", "composite"] == pytest.approx(df.loc["STRONG", "trend_score"])
+
+
 def test_market_regime_detects_trend():
     up = make_df(np.linspace(100, 200, 300))
     down = make_df(np.linspace(200, 100, 300))
