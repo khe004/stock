@@ -1398,8 +1398,9 @@ def render_market_screen():
     st.title("市场筛选")
     st.caption("当前强弱【快照】（非回测）：**综合分 = 动量半 + 价值半**——"
                "动量分 = 12-1动量 / 52周位置 / 距200日均线 三维横截面百分位均值；"
-               "价值分 = 盈利收益率(1/PE)百分位（越便宜越高，仅个股）。动量买贵的赢家、"
-               "价值买便宜的，50/50 融合是刻意折中；各维等权、不做权重优化（避免过拟合）。"
+               "价值分 = 盈利收益率(1/PE)的【行业内】百分位（同行业内越便宜越高，仅个股）——"
+               "行业内中性化消除科技高PE/银行低PE的结构性偏差，否则'价值'沦为行业押注。"
+               "动量买贵的赢家、价值买便宜的，50/50 融合是刻意折中；不做权重优化（避免过拟合）。"
                "价值用当前基本面快照（非 point-in-time 历史）；个股宇宙含幸存者偏差；"
                "12-1 动量有短期反转/买在山顶风险。仅作强弱参考，不构成交易建议。")
 
@@ -1445,6 +1446,7 @@ def render_market_screen():
 
     # ── 个股强弱榜 ──
     st.subheader("个股强弱榜（S&P500 候选池）")
+    sec_map = _stock_sector_map()
     with st.spinner("加载个股行情与基本面并计算强弱…"):
         stock_syms = cfg.universe_symbols("universe_sp500.yaml")
         stock_prices = {s: store.load_prices(conn, s) for s in stock_syms}
@@ -1452,11 +1454,11 @@ def render_market_screen():
         fdf = store.load_fundamentals(conn)
         latest_fund = (fdf.sort_values("date").groupby("symbol").last()
                        if not fdf.empty else None)
-        stock_str = compute_strength(stock_prices, fundamentals=latest_fund)
+        # 价值分行业内中性化：传入行业映射，消除科技高PE/银行低PE的结构性偏差
+        stock_str = compute_strength(stock_prices, fundamentals=latest_fund, sectors=sec_map)
     if stock_str.empty:
         st.warning("个股行情不足（需要至少约 1 年数据）")
         return
-    sec_map = _stock_sector_map()
     stock_str["行业"] = [sec_map.get(s, "") for s in stock_str.index]
     has_val = "value_score" in stock_str.columns
     n_pe = int(stock_str["pe"].notna().sum()) if "pe" in stock_str.columns else 0

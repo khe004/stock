@@ -28,6 +28,7 @@ STRENGTH_DIMS = ("mom", "pos_52w", "dist_ma")
 def compute_strength(
     prices: dict[str, pd.DataFrame],
     fundamentals: pd.DataFrame | None = None,
+    sectors: dict | pd.Series | None = None,
     lookback: int = 252,
     skip: int = 21,
     ma: int = 200,
@@ -39,11 +40,14 @@ def compute_strength(
         prices: symbol -> 日线 DataFrame。
         fundamentals: 可选，索引=symbol、含 trailing_pe 列的当前基本面快照。
             提供时综合分融入价值分（动量半+价值半）；否则综合分为纯动量分。
+        sectors: 可选，symbol -> 行业。提供时价值分做【行业内中性化】——盈利收益率
+            在同行业内排百分位，消除科技高PE/银行低PE的结构性偏差（否则"价值"沦为
+            "做多低PE行业"的行业押注）。不提供则价值分为全市场横截面百分位。
 
     返回 DataFrame（索引=symbol，按综合分降序），列：
     mom（12-1动量）、pos_52w（52周位置 0~1）、dist_ma（距均线偏离）、above_ma、
     trend_score（动量分 0~1）、composite（综合分 0~1）；提供 fundamentals 时另有
-    pe（trailing PE）、earn_yield（盈利收益率）、value_score（价值分 0~1）。
+    pe（trailing PE）、earn_yield（盈利收益率）、value_score（价值分 0~1，行业内中性化）。
     历史不足 lookback+1 日的标的被跳过。
     """
     adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
@@ -78,7 +82,12 @@ def compute_strength(
         pe = pd.to_numeric(fundamentals["trailing_pe"].reindex(df.index), errors="coerce")
         df["pe"] = pe
         df["earn_yield"] = (1.0 / pe.where(pe > 0))  # 负盈利/无PE → NaN
-        value = df["earn_yield"].rank(pct=True)
+        if sectors is not None:
+            # 行业内中性化：盈利收益率在【同行业】内排百分位，消除行业结构性 PE 差异
+            sec = pd.Series(sectors).reindex(df.index).fillna("其他")
+            value = df.groupby(sec)["earn_yield"].rank(pct=True)
+        else:
+            value = df["earn_yield"].rank(pct=True)
         df["value_score"] = value
         # 动量半 + 价值半；价值缺失（无PE）的标的按 skipna 退回只用动量分
         df["composite"] = pd.concat([trend, value], axis=1).mean(axis=1)

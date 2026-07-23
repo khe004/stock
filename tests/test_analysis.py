@@ -170,6 +170,25 @@ def test_compute_strength_value_factor():
     assert list(df.index)[0] == "A"
 
 
+def test_compute_strength_value_sector_neutral():
+    """价值分行业内中性化：高PE行业里的便宜股，价值分应高于低PE行业里的贵股。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["TECH_A", "TECH_B", "BANK_A", "BANK_B"]}
+    # 科技行业 PE 结构性高（30/50），银行结构性低（8/12）
+    fund = pd.DataFrame(
+        {"trailing_pe": [30.0, 50.0, 8.0, 12.0]},
+        index=["TECH_A", "TECH_B", "BANK_A", "BANK_B"],
+    )
+    sectors = {"TECH_A": "科技", "TECH_B": "科技", "BANK_A": "银行", "BANK_B": "银行"}
+    df = compute_strength(px, fundamentals=fund, sectors=sectors)
+    # 行业内：TECH_A（30<50）是科技里便宜的 → 价值分 = 组内高分（1.0）
+    #        TECH_B 是科技里贵的 → 组内低分
+    assert df.loc["TECH_A", "value_score"] > df.loc["TECH_B", "value_score"]
+    assert df.loc["BANK_A", "value_score"] > df.loc["BANK_B", "value_score"]
+    # 关键：PE=30 的科技便宜股，价值分不输给 PE=12 的银行贵股（横截面会反过来）
+    assert df.loc["TECH_A", "value_score"] >= df.loc["BANK_B", "value_score"]
+
+
 def test_compute_strength_no_pe_falls_back_to_momentum():
     """负盈利/无 P/E 的标的价值分缺失，综合分退回只用动量分（不倒扣为0）。"""
     n = 300
