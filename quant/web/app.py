@@ -892,8 +892,9 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     end_str = bench_window.index[-1].strftime("%Y-%m-%d")
     st.caption(f"组合轮动模式：资金始终在场内换仓，区间起点按区间之前的信号还原应有持仓。"
                f"价格为复权价（含分红），单边成本 {cfg.cost_bps:.0f}bp。"
-               f"基准为一次性长持对照（{bench_symbol}，宇宙含 QQQ 时另加 QQQ 长持；"
-               f"资金时间敞口一致才可比；定投基准只在智能定投模式提供）。")
+               f"基准：SPY长持（风险标杆）+ QQQ长持（增长标杆）固定对照，部分策略另有"
+               f"专属公平基准（板块等权/池子等权/等权全资产）。理想=收益/年化/夏普优于"
+               f"QQQ、回撤/Calmar 优于 SPY。")
 
     if params.get("universe_file"):
         excluded = st.multiselect(
@@ -927,17 +928,18 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
                                     INITIAL_CASH, cfg.cost_bps)
     metric_cards(result.metrics())
 
-    px = price_series(bench_window)
-    hold = hold_equity(px, INITIAL_CASH, cfg.cost_bps)
     strategy_total = equity_metrics(result.equity, INITIAL_CASH)["total_return"]
 
-    benchmarks: dict[str, pd.Series] = {f"{bench_symbol}长持": hold}
-    # QQQ 长持基准：宇宙含 QQQ 且非主基准时补上。如 dual_momentum 在 SPY/QQQ/TLT 间
-    # 来回切，QQQ 2015-2024 极强，需看策略是否真跑赢 QQQ 长持——暴露出来更诚实。
-    if "QQQ" in prices and bench_symbol != "QQQ":
-        qqq = prices["QQQ"].loc[start_str:end_str]
-        if not qqq.empty:
-            benchmarks["QQQ长持"] = hold_equity(price_series(qqq), INITIAL_CASH, cfg.cost_bps)
+    # 通用基准：SPY长持（风险标杆）+ QQQ长持（增长标杆）——对所有策略固定显示，
+    # 无论策略宇宙是否含它们（从库内单独加载）。理想：收益/年化/夏普优于 QQQ、
+    # 回撤/Calmar 优于 SPY。
+    benchmarks: dict[str, pd.Series] = {}
+    for _b in ("SPY", "QQQ"):
+        _bdf = store.load_prices(conn, _b)
+        if not _bdf.empty:
+            _bw = _bdf.loc[start_str:end_str]
+            if not _bw.empty:
+                benchmarks[f"{_b}长持"] = hold_equity(price_series(_bw), INITIAL_CASH, cfg.cost_bps)
     # 纯板块策略（如 momentum）：加板块等权基准。用户观察"板块策略全跑输 XLK 长持"，
     # 但 XLK 是事后赢家；板块等权才是去掉幸存者偏差、判断轮动有没有加信息的公平对照。
     if params.get("groups") == ["sectors"]:
