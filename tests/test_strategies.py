@@ -443,3 +443,180 @@ def test_low_vol_not_enough_symbols():
     signals = LowVol(lookback_days=30, top_n=3).generate(prices)
     assert signals == [], "标的数 <= top_n 时不应发信号"
 
+
+# ──────────────── cross_asset_mom 跨资产动量测试 ────────────────
+
+@pytest.fixture
+def cross_asset_prices():
+    """构造跨资产动量测试数据：需要足够长的历史覆盖 252+21 日回看窗口。
+
+    SPY: 强势上涨（12-1 动量最高）
+    QQQ: 中等上涨
+    VEA: 微涨
+    VWO: 横盘
+    TLT: 缓慢下跌（动量为负）
+    HYG: 缓慢下跌（动量为负）
+    GLD: 微涨
+    DBC: 横盘
+    XLRE: 微涨
+    """
+    n = 350
+    return {
+        "SPY": make_df_start(100 * 1.004 ** np.arange(n), start="2023-01-02"),   # 最强动量
+        "QQQ": make_df_start(100 * 1.003 ** np.arange(n), start="2023-01-02"),   # 次强
+        "VEA": make_df_start(100 * 1.001 ** np.arange(n), start="2023-01-02"),   # 微涨
+        "VWO": make_df_start(np.full(n, 100.0), start="2023-01-02"),             # 横盘
+        "TLT": make_df_start(100 * 0.999 ** np.arange(n), start="2023-01-02"),   # 缓跌
+        "HYG": make_df_start(100 * 0.998 ** np.arange(n), start="2023-01-02"),   # 缓跌
+        "GLD": make_df_start(100 * 1.0015 ** np.arange(n), start="2023-01-02"),  # 微涨
+        "DBC": make_df_start(np.full(n, 100.0), start="2023-01-02"),             # 横盘
+        "XLRE": make_df_start(100 * 1.0012 ** np.arange(n), start="2023-01-02"), # 微涨
+    }
+
+
+def test_cross_asset_mom_monthly_rotation(cross_asset_prices):
+    """跨资产动量：应在月度调仓日选中动量最强的 top_n 类资产。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=3,
+                                  abs_momentum=False).generate(cross_asset_prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "应有买入信号"
+    # SPY 和 QQQ 动量最强，应被选中
+    bought = {s.symbol for s in buys}
+    assert "SPY" in bought, "动量最强的 SPY 应被选中"
+    assert "QQQ" in bought, "动量次强的 QQQ 应被选中"
+    # 下跌的不应被选中
+    assert "TLT" not in bought, "动量为负的 TLT 不应被选中"
+    assert "HYG" not in bought, "动量为负的 HYG 不应被选中"
+    # 验证信号日期在月首（月度调仓）
+    buy_dates = [pd.Timestamp(s.date) for s in buys]
+    for d in buy_dates:
+        assert d.day <= 7, f"买入信号应在月初，实际日期 {d}"
+
+
+def test_cross_asset_mom_abs_momentum_all_negative():
+    """绝对动量开关：全部标的动量为负时，不发买入信号（持现金）。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    n = 350
+    # 所有资产都在下跌
+    prices = {
+        "A": make_df_start(100 * 0.998 ** np.arange(n), start="2023-01-02"),
+        "B": make_df_start(100 * 0.997 ** np.arange(n), start="2023-01-02"),
+        "C": make_df_start(100 * 0.996 ** np.arange(n), start="2023-01-02"),
+        "D": make_df_start(100 * 0.995 ** np.arange(n), start="2023-01-02"),
+        "E": make_df_start(100 * 0.994 ** np.arange(n), start="2023-01-02"),
+    }
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=2,
+                                  abs_momentum=True).generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys == [], "全部动量为负时，绝对动量开关应阻止所有买入"
+
+
+def test_cross_asset_mom_abs_momentum_partial_positive():
+    """绝对动量开关：部分正部分负时，只买入动量为正的。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    n = 350
+    prices = {
+        "UP1": make_df_start(100 * 1.004 ** np.arange(n), start="2023-01-02"),   # 正
+        "UP2": make_df_start(100 * 1.002 ** np.arange(n), start="2023-01-02"),   # 正
+        "DOWN1": make_df_start(100 * 0.998 ** np.arange(n), start="2023-01-02"), # 负
+        "DOWN2": make_df_start(100 * 0.997 ** np.arange(n), start="2023-01-02"), # 负
+        "DOWN3": make_df_start(100 * 0.996 ** np.arange(n), start="2023-01-02"), # 负
+    }
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=3,
+                                  abs_momentum=True).generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "有正动量的标的应被买入"
+    bought = {s.symbol for s in buys}
+    assert "UP1" in bought, "正动量的 UP1 应被选中"
+    assert "UP2" in bought, "正动量的 UP2 应被选中"
+    # 负动量的不应出现在买入中
+    assert "DOWN1" not in bought, "负动量的标的不应被买入"
+    assert "DOWN2" not in bought, "负动量的标的不应被买入"
+
+
+def test_cross_asset_mom_abs_off_buys_negative():
+    """abs_momentum=False 时，即使动量为负也应买入。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    n = 350
+    prices = {
+        "A": make_df_start(100 * 0.998 ** np.arange(n), start="2023-01-02"),
+        "B": make_df_start(100 * 0.997 ** np.arange(n), start="2023-01-02"),
+        "C": make_df_start(100 * 0.996 ** np.arange(n), start="2023-01-02"),
+        "D": make_df_start(100 * 0.995 ** np.arange(n), start="2023-01-02"),
+        "E": make_df_start(100 * 0.994 ** np.arange(n), start="2023-01-02"),
+    }
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=2,
+                                  abs_momentum=False).generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "abs_momentum=False 时即使全部为负也应有买入"
+
+
+def test_cross_asset_mom_reason_has_values(cross_asset_prices):
+    """reason 必须含 12-1 动量数值和排名。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=3,
+                                  abs_momentum=False).generate(cross_asset_prices)
+    assert signals, "应有信号"
+    for s in signals:
+        assert "12-1 动量" in s.reason, f"reason 应含'12-1 动量'：{s.reason}"
+        assert "%" in s.reason, f"reason 应含百分比数值：{s.reason}"
+
+
+def test_cross_asset_mom_strength_in_range(cross_asset_prices):
+    """strength 应在 (0, 1] 范围。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=3,
+                                  abs_momentum=False).generate(cross_asset_prices)
+    assert signals, "应有信号"
+    for s in signals:
+        assert 0 < s.strength <= 1, f"strength 应在 (0, 1]：{s.strength}"
+
+
+def test_cross_asset_mom_no_signal_when_window_insufficient():
+    """窗口不足时不发信号。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    short = {
+        sym: make_df(np.linspace(100, 110 + i, 30))
+        for i, sym in enumerate(["A", "B", "C", "D", "E"])
+    }
+    signals = CrossAssetMomentum(lookback_days=252, skip_days=21, top_n=2).generate(short)
+    assert signals == [], "数据不足窗口时不应发信号"
+
+
+def test_cross_asset_mom_not_enough_symbols():
+    """标的数不足 top_n 时不发信号。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    prices = {
+        "A": make_df(100 * 1.001 ** np.arange(100)),
+        "B": make_df(100 * 1.002 ** np.arange(100)),
+    }
+    signals = CrossAssetMomentum(lookback_days=30, skip_days=5, top_n=3).generate(prices)
+    assert signals == [], "标的数 <= top_n 时不应发信号"
+
+
+def test_cross_asset_mom_sell_on_exit(cross_asset_prices):
+    """跌出前 top_n 时应有 SELL 信号。"""
+    from quant.strategies.cross_asset import CrossAssetMomentum
+
+    prices = dict(cross_asset_prices)
+    n = 350
+    # SPY 先涨后跌，让它从 top3 跌出
+    spy_up = 100 * 1.004 ** np.arange(200)
+    spy_down = spy_up[-1] * 0.998 ** np.arange(150)
+    prices["SPY"] = make_df_start(np.concatenate([spy_up, spy_down]), start="2023-01-02")
+
+    signals = CrossAssetMomentum(lookback_days=60, skip_days=5, top_n=3,
+                                  abs_momentum=False).generate(prices)
+    spy_sells = [s for s in signals if s.symbol == "SPY" and s.direction == SELL]
+    assert spy_sells, "SPY 动量转弱后应有卖出信号"
+
+

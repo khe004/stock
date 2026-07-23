@@ -39,6 +39,16 @@ watchlist:
     - VWO               # 新兴市场（r≈0.69）
     - VEA               # 发达市场（美国以外，r≈0.77）
     - HYG               # 高收益信用债（r≈0.75）
+  cross_asset_mom_universe:  # 跨资产动量轮动宇宙（9类低相关资产）
+    - SPY               # 美股大盘
+    - QQQ               # 纳指100
+    - VEA               # 发达市场（美国以外）
+    - VWO               # 新兴市场
+    - TLT               # 长期国债
+    - HYG               # 高收益信用债
+    - GLD               # 黄金
+    - DBC               # 广谱商品
+    - XLRE              # REITs
   sub_themes:           # 细分主题（独立于宽科技的子周期）
     - DRAM              # 存储/内存（Roundhill；与宽半导体 r≈0.87，最分化的半导体子行业；历史仅约3月）
     - XBI               # 生物科技（等权，特质性强 r≈0.70）
@@ -119,6 +129,15 @@ strategies:
     groups: [sectors, assets]  # 行业 ETF + 资产类（含 TLT 长债/GLD 黄金）：
                             # 扩宇宙让低波动能选到非股票资产，降低与动量家族的相关性
                             # （sectors-only 时因同为长多股票、共享市场beta，相关仍约0.5）
+  cross_asset_mom:            # 跨资产 12-1 月度动量轮动 + 绝对动量开关
+    enabled: true             # 首个干净跑赢公平基准的动量策略
+    lookback_days: 252        # 动量回看约 12 个月（与 momentum/stock_momentum 一致）
+    skip_days: 21             # 跳过最近约 1 个月（12-1 口径，避开短期反转）
+    top_n: 3                  # 每月持有动量最强的前 3 类资产
+    abs_momentum: true        # 绝对动量开关：动量为负不买入持现金（熊市保险）
+    groups: [cross_asset_mom_universe]  # 9 类低相关资产宇宙
+                              # 实测 top3+abs：+237%/夏普0.80/回撤-21.5%/Calmar0.52
+                              # 跑赢等权全资产基准（+172%/0.39），动量真加了信息
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

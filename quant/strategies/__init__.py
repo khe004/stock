@@ -1,4 +1,5 @@
 from quant.strategies.base import BUY, SELL, Signal, Strategy
+from quant.strategies.cross_asset import CrossAssetMomentum
 from quant.strategies.dual_momentum import DualMomentum
 from quant.strategies.low_vol import LowVol
 from quant.strategies.momentum import Momentum
@@ -11,7 +12,7 @@ from quant.strategies.vix_regime import VixRegime
 REGISTRY: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (SmaCross, Momentum, RsiReversal, SmartDca, DualMomentum,
-                VixRegime, StockMomentum, LowVol)
+                VixRegime, StockMomentum, LowVol, CrossAssetMomentum)
 }
 
 
