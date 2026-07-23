@@ -1376,11 +1376,11 @@ def _render_strength_table(df: pd.DataFrame, label_map: dict | None = None):
     cols.append("composite")
     show = d[cols].rename(columns={
         "mom": "12-1动量", "pos_52w": "52周位置", "dist_ma": "距200MA",
-        "pe": "P/E", "composite": "综合分",
+        "pe": "远期P/E", "composite": "综合分",
     })
     fmt = {"12-1动量": "{:+.1%}", "52周位置": "{:.0%}", "距200MA": "{:+.1%}", "综合分": "{:.0%}"}
-    if "P/E" in show.columns:
-        fmt["P/E"] = "{:.1f}"
+    if "远期P/E" in show.columns:
+        fmt["远期P/E"] = "{:.1f}"
     styler = (show.style
               .map(signed_color, subset=[c for c in ["12-1动量", "距200MA"] if c in show.columns])
               .format(fmt, na_rep="—"))
@@ -1398,8 +1398,9 @@ def render_market_screen():
     st.title("市场筛选")
     st.caption("当前强弱【快照】（非回测）：**综合分 = 动量半 + 价值半**——"
                "动量分 = 12-1动量 / 52周位置 / 距200日均线 三维横截面百分位均值；"
-               "价值分 = 盈利收益率(1/PE)的【行业内】百分位（同行业内越便宜越高，仅个股）——"
-               "行业内中性化消除科技高PE/银行低PE的结构性偏差，否则'价值'沦为行业押注。"
+               "价值分 = 盈利收益率(1/远期PE)的【行业内】百分位（同行业内越便宜越高，仅个股）——"
+               "用 forward PE 反映增长预期（成长股 trailing 常畸高）；行业内中性化消除"
+               "科技高PE/银行低PE的结构性偏差，否则'价值'沦为行业押注。"
                "动量买贵的赢家、价值买便宜的，50/50 融合是刻意折中；不做权重优化（避免过拟合）。"
                "价值用当前基本面快照（非 point-in-time 历史）；个股宇宙含幸存者偏差；"
                "12-1 动量有短期反转/买在山顶风险。仅作强弱参考，不构成交易建议。")
@@ -1464,8 +1465,8 @@ def render_market_screen():
     n_pe = int(stock_str["pe"].notna().sum()) if "pe" in stock_str.columns else 0
     fund_date = str(latest_fund["date"].iloc[0]) if latest_fund is not None and not latest_fund.empty else "无"
     st.caption(f"共 {len(stock_str)} 只个股参与排名，截至各自最新交易日。当前按【{sort_label}】排序。"
-               + (f"综合分=动量半+价值半；价值用 {fund_date} 基本面快照，{n_pe} 只有有效 P/E"
-                  f"（负盈利者无 P/E、价值分缺失，综合分退回只用动量）。" if has_val
+               + (f"综合分=动量半+价值半；价值用 {fund_date} 基本面快照的远期 PE（缺失回退 trailing），"
+                  f"{n_pe} 只有有效 PE（负盈利且无正远期 PE 者价值分缺失，综合分退回只用动量）。" if has_val
                   else "（基本面表暂无数据，综合分为纯动量；跑 run_daily 记录基本面后生效。）"))
     ranked = _sort_strength(stock_str, sort_col)
     n = st.slider("每侧显示数量", 5, 30, 15, key="screen_n")

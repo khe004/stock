@@ -26,7 +26,7 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 - `quant/analysis/`：market.py（52周区间位置/行业宽度/收益率利差，纯计算给市场概览页用）、
   scoring.py（signal_forward_returns 逐信号算 5/20/60 日前瞻收益，给策略评分页用）、
   correlation.py（策略相关性/组合诊断：各策略权益曲线转日收益率→Pearson相关矩阵→等权组合分散效果）、
-  screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面百分位]+价值半[盈利收益率1/PE的【行业内】百分位，行业内中性化消除科技高PE/银行低PE偏差]，用当前基本面快照非point-in-time）
+  screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面百分位]+价值半[盈利收益率1/forwardPE的【行业内】百分位；forward反映增长预期、缺失回退trailing；行业内中性化消除科技高PE/银行低PE偏差]，用当前基本面快照非point-in-time）
 - `quant/web/app.py`：九页面板（市场概览/信号历史/K线/动量排名/市场筛选/策略评分/策略相关性/回测/策略说明）；
   回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
 

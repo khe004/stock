@@ -170,6 +170,33 @@ def test_compute_strength_value_factor():
     assert list(df.index)[0] == "A"
 
 
+def test_compute_strength_prefers_forward_pe():
+    """默认用 forward PE：成长股 trailing 畸高但 forward 便宜时，按 forward 判价值。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["GROWTH", "VALUE"]}
+    fund = pd.DataFrame(
+        {"trailing_pe": [100.0, 20.0], "forward_pe": [10.0, 25.0]},
+        index=["GROWTH", "VALUE"],
+    )
+    df = compute_strength(px, fundamentals=fund)
+    # GROWTH 用 forward=10（而非 trailing=100）→ 盈利收益率更高、价值分更高
+    assert df.loc["GROWTH", "pe"] == pytest.approx(10.0)
+    assert df.loc["GROWTH", "earn_yield"] > df.loc["VALUE", "earn_yield"]
+
+
+def test_compute_strength_forward_fallback_to_trailing():
+    """forward 缺失/非正时回退 trailing。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["A", "B"]}
+    fund = pd.DataFrame(
+        {"trailing_pe": [12.0, 20.0], "forward_pe": [None, -5.0]},  # A 无 forward、B 负 forward
+        index=["A", "B"],
+    )
+    df = compute_strength(px, fundamentals=fund)
+    assert df.loc["A", "pe"] == pytest.approx(12.0)  # 回退 trailing
+    assert df.loc["B", "pe"] == pytest.approx(20.0)  # 负 forward → 回退 trailing
+
+
 def test_compute_strength_value_sector_neutral():
     """价值分行业内中性化：高PE行业里的便宜股，价值分应高于低PE行业里的贵股。"""
     n = 300

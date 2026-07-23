@@ -6,8 +6,11 @@
   - 12-1 动量：近 lookback 日收益但跳过最近 skip 日（避短期反转），中长期趋势强度
   - 52 周区间位置：现价在过去 range_window 日 [低,高] 区间的位置（0~1，越高越强）
   - 距均线：现价相对 ma 日均线的偏离（正=站上均线，趋势向上）
-- 价值分 = 盈利收益率 E/P（= 1/trailing_pe，仅正盈利）的横截面百分位（越便宜越高）。
+- 价值分 = 盈利收益率 E/P（= 1/forward_pe，反映分析师预期盈利/增长趋势；forward 缺失
+  或非正时回退 trailing_pe）的【行业内】百分位（同行业内越便宜越高）。用 forward 而非
+  trailing：成长股 trailing PE 常被畸高误判为"贵"（如 AMD 164 vs forward 37）。
   负盈利/无 P/E 的标的价值分缺失，其综合分退回只用动量分（不倒扣）。
+  注意 forward 依赖分析师估计，可能偏乐观/被修正——它是"预期便宜"不等于"真便宜"。
 
 动量与价值理念相反（动量买贵的赢家、价值买便宜的），50/50 融合是刻意的多因子折中；
 各维仍用百分位等权、不做权重优化（避免落入 stock_momentum 那类过拟合陷阱）。
@@ -29,6 +32,8 @@ def compute_strength(
     prices: dict[str, pd.DataFrame],
     fundamentals: pd.DataFrame | None = None,
     sectors: dict | pd.Series | None = None,
+    pe_field: str = "forward_pe",
+    pe_fallback: str | None = "trailing_pe",
     lookback: int = 252,
     skip: int = 21,
     ma: int = 200,
@@ -72,14 +77,18 @@ def compute_strength(
     trend = pd.concat([df[c].rank(pct=True) for c in STRENGTH_DIMS], axis=1).mean(axis=1)
     df["trend_score"] = trend
 
-    # 价值维度：盈利收益率 E/P = 1/trailing_pe（仅正盈利）
-    has_value = (
-        fundamentals is not None
-        and "trailing_pe" in fundamentals.columns
-        and fundamentals["trailing_pe"].reindex(df.index).where(lambda s: s > 0).notna().any()
-    )
-    if has_value:
-        pe = pd.to_numeric(fundamentals["trailing_pe"].reindex(df.index), errors="coerce")
+    # 价值维度：盈利收益率 E/P = 1/PE。默认用 forward PE（反映分析师预期盈利=增长趋势），
+    # forward 缺失/非正时回退 trailing PE（成长股 trailing 常被畸高，如 AMD 164→forward 37）。
+    pe = None
+    if fundamentals is not None:
+        def _col(name):
+            if name and name in fundamentals.columns:
+                return pd.to_numeric(fundamentals[name].reindex(df.index), errors="coerce")
+            return pd.Series(index=df.index, dtype="float64")
+        pe = _col(pe_field)
+        if pe_fallback:
+            pe = pe.where(pe > 0, _col(pe_fallback))  # forward 非正/缺失 → 回退 trailing
+    if pe is not None and pe.where(pe > 0).notna().any():
         df["pe"] = pe
         df["earn_yield"] = (1.0 / pe.where(pe > 0))  # 负盈利/无PE → NaN
         if sectors is not None:
