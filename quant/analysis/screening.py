@@ -6,11 +6,14 @@
   - 12-1 动量：近 lookback 日收益但跳过最近 skip 日（避短期反转），中长期趋势强度
   - 52 周区间位置：现价在过去 range_window 日 [低,高] 区间的位置（0~1，越高越强）
   - 距均线：现价相对 ma 日均线的偏离（正=站上均线，趋势向上）
-- 价值分 = 盈利收益率 E/P（= 1/forward_pe，反映分析师预期盈利/增长趋势；forward 缺失
-  或非正时回退 trailing_pe）的【行业内】百分位（同行业内越便宜越高）。用 forward 而非
-  trailing：成长股 trailing PE 常被畸高误判为"贵"（如 AMD 164 vs forward 37）。
-  负盈利/无 P/E 的标的价值分缺失，其综合分退回只用动量分（不倒扣）。
-  注意 forward 依赖分析师估计，可能偏乐观/被修正——它是"预期便宜"不等于"真便宜"。
+- 价值分 = 两个价值口径各自【行业内】百分位的等权平均（同行业内越便宜越高）：
+    · forward 盈利收益率 1/forward_pe（缺失回退 trailing）——分析师 forward 剔一次性项目
+    · EV/EBITDA 收益率 1/ev_to_ebitda——投资收益等非经营项目不入 EBITDA（金融失效则跳过）
+  用双口径而非单 trailing PE 是为抗【盈利质量畸变】：一笔大投资收益会灌高 GAAP 净利润、
+  压低 trailing PE 看着假便宜（如 Alphabet $99B 股权收益把 EPS 从核心~$2.85 灌到 $9.11），
+  forward 与 EV/EBITDA 都不吃这个亏。用 forward 还能修成长股畸高的 trailing（AMD 164→37）。
+  两口径全缺（负盈利+无EBITDA）的标的价值分缺失，综合分退回只用动量分（不倒扣）。
+  注意 forward 依赖分析师估计、可能偏乐观/被修正——是"预期便宜"不等于"真便宜"。
 
 动量与价值理念相反（动量买贵的赢家、价值买便宜的），50/50 融合是刻意的多因子折中；
 各维仍用百分位等权、不做权重优化（避免落入 stock_momentum 那类过拟合陷阱）。
@@ -34,6 +37,7 @@ def compute_strength(
     sectors: dict | pd.Series | None = None,
     pe_field: str = "forward_pe",
     pe_fallback: str | None = "trailing_pe",
+    ebitda_field: str = "ev_to_ebitda",
     lookback: int = 252,
     skip: int = 21,
     ma: int = 200,
@@ -77,29 +81,44 @@ def compute_strength(
     trend = pd.concat([df[c].rank(pct=True) for c in STRENGTH_DIMS], axis=1).mean(axis=1)
     df["trend_score"] = trend
 
-    # 价值维度：盈利收益率 E/P = 1/PE。默认用 forward PE（反映分析师预期盈利=增长趋势），
-    # forward 缺失/非正时回退 trailing PE（成长股 trailing 常被畸高，如 AMD 164→forward 37）。
-    pe = None
-    if fundamentals is not None:
-        def _col(name):
-            if name and name in fundamentals.columns:
-                return pd.to_numeric(fundamentals[name].reindex(df.index), errors="coerce")
-            return pd.Series(index=df.index, dtype="float64")
-        pe = _col(pe_field)
-        if pe_fallback:
-            pe = pe.where(pe > 0, _col(pe_fallback))  # forward 非正/缺失 → 回退 trailing
-    if pe is not None and pe.where(pe > 0).notna().any():
+    # 价值维度（多口径混合，抗盈利质量畸变）：
+    #   - forward 盈利收益率 = 1/forward_pe（缺失/非正回退 trailing）——分析师 forward 估计
+    #     本就剔除一次性项目，不吃一笔大投资收益灌高 GAAP 净利润的亏
+    #   - EV/EBITDA 收益率 = 1/ev_to_ebitda（仅正）——投资收益等非经营项目在营业利润线以下、
+    #     不进 EBITDA，故亦免疫。金融/保险 EBITDA 无意义（EV/EBITDA 常负），自动只用 forward
+    # 两口径各自【行业内】排百分位再等权平均（缺口径按可得的平均）。
+    # 案例：Alphabet 一笔 $99B 股权收益把 diluted EPS 从核心~$2.85 灌到 $9.11、trailing PE
+    #       腰斩看着"便宜"——forward 与 EV/EBITDA 都不被骗。
+    def _col(name):
+        if fundamentals is not None and name and name in fundamentals.columns:
+            return pd.to_numeric(fundamentals[name].reindex(df.index), errors="coerce")
+        return pd.Series(index=df.index, dtype="float64")
+
+    sec = pd.Series(sectors).reindex(df.index).fillna("其他") if sectors is not None else None
+
+    def _neutral_rank(yld: pd.Series) -> pd.Series:
+        """收益率的行业内百分位（无 sectors 时退回全市场横截面）。"""
+        return yld.groupby(sec).rank(pct=True) if sec is not None else yld.rank(pct=True)
+
+    value_ranks = []
+    pe = _col(pe_field)
+    if pe_fallback:
+        pe = pe.where(pe > 0, _col(pe_fallback))  # forward 非正/缺失 → 回退 trailing
+    if pe.where(pe > 0).notna().any():
         df["pe"] = pe
-        df["earn_yield"] = (1.0 / pe.where(pe > 0))  # 负盈利/无PE → NaN
-        if sectors is not None:
-            # 行业内中性化：盈利收益率在【同行业】内排百分位，消除行业结构性 PE 差异
-            sec = pd.Series(sectors).reindex(df.index).fillna("其他")
-            value = df.groupby(sec)["earn_yield"].rank(pct=True)
-        else:
-            value = df["earn_yield"].rank(pct=True)
-        df["value_score"] = value
-        # 动量半 + 价值半；价值缺失（无PE）的标的按 skipna 退回只用动量分
-        df["composite"] = pd.concat([trend, value], axis=1).mean(axis=1)
+        df["earn_yield"] = 1.0 / pe.where(pe > 0)
+        value_ranks.append(_neutral_rank(df["earn_yield"]))
+    ebitda = _col(ebitda_field)
+    if ebitda.where(ebitda > 0).notna().any():
+        df["ev_ebitda"] = ebitda
+        df["ebitda_yield"] = 1.0 / ebitda.where(ebitda > 0)  # 负/缺（金融）→ NaN
+        value_ranks.append(_neutral_rank(df["ebitda_yield"]))
+
+    if value_ranks:
+        # 多口径行业内百分位等权平均（某口径缺失按 skipna 用可得的）
+        df["value_score"] = pd.concat(value_ranks, axis=1).mean(axis=1)
+        # 动量半 + 价值半；价值全缺的标的按 skipna 退回只用动量分
+        df["composite"] = pd.concat([trend, df["value_score"]], axis=1).mean(axis=1)
     else:
         df["composite"] = trend
 

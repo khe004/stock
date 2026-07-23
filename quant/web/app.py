@@ -1371,16 +1371,19 @@ def _render_strength_table(df: pd.DataFrame, label_map: dict | None = None):
         f"{s}｜{label_map[s]}" if label_map and s in label_map else s for s in d.index
     ])
     cols = ["标的"] + (["行业"] if "行业" in d.columns else []) + ["mom", "pos_52w", "dist_ma"]
-    if "pe" in d.columns:
-        cols.append("pe")
+    for c in ("pe", "ev_ebitda"):
+        if c in d.columns:
+            cols.append(c)
     cols.append("composite")
     show = d[cols].rename(columns={
         "mom": "12-1动量", "pos_52w": "52周位置", "dist_ma": "距200MA",
-        "pe": "远期P/E", "composite": "综合分",
+        "pe": "远期P/E", "ev_ebitda": "EV/EBITDA", "composite": "综合分",
     })
     fmt = {"12-1动量": "{:+.1%}", "52周位置": "{:.0%}", "距200MA": "{:+.1%}", "综合分": "{:.0%}"}
     if "远期P/E" in show.columns:
         fmt["远期P/E"] = "{:.1f}"
+    if "EV/EBITDA" in show.columns:
+        fmt["EV/EBITDA"] = "{:.1f}"
     styler = (show.style
               .map(signed_color, subset=[c for c in ["12-1动量", "距200MA"] if c in show.columns])
               .format(fmt, na_rep="—"))
@@ -1398,9 +1401,10 @@ def render_market_screen():
     st.title("市场筛选")
     st.caption("当前强弱【快照】（非回测）：**综合分 = 动量半 + 价值半**——"
                "动量分 = 12-1动量 / 52周位置 / 距200日均线 三维横截面百分位均值；"
-               "价值分 = 盈利收益率(1/远期PE)的【行业内】百分位（同行业内越便宜越高，仅个股）——"
-               "用 forward PE 反映增长预期（成长股 trailing 常畸高）；行业内中性化消除"
-               "科技高PE/银行低PE的结构性偏差，否则'价值'沦为行业押注。"
+               "价值分 = forward盈利收益率 + EV/EBITDA收益率 双口径的【行业内】百分位均值"
+               "（仅个股）——forward 与 EV/EBITDA 都剔除一次性投资收益（如 Alphabet $99B 股权"
+               "收益灌高 GAAP EPS、压低 trailing PE 的假便宜）；行业内中性化消除科技高PE/"
+               "银行低PE的结构性偏差，否则'价值'沦为行业押注。"
                "动量买贵的赢家、价值买便宜的，50/50 融合是刻意折中；不做权重优化（避免过拟合）。"
                "价值用当前基本面快照（非 point-in-time 历史）；个股宇宙含幸存者偏差；"
                "12-1 动量有短期反转/买在山顶风险。仅作强弱参考，不构成交易建议。")
@@ -1429,11 +1433,12 @@ def render_market_screen():
     # ── 排序依据（同时作用于板块表与个股榜）──
     SORT_OPTIONS = {"综合分（动量+价值）": "composite", "12-1动量": "mom",
                     "52周位置": "pos_52w", "距200日均线": "dist_ma",
-                    "盈利收益率（价值·仅个股）": "earn_yield"}
+                    "价值分（行业内·仅个股）": "value_score"}
     sort_label = st.selectbox(
         "排序依据", list(SORT_OPTIONS), index=0, key="screen_sort",
         help="综合分=动量半+价值半；选单一维度可看纯榜单（如 12-1动量 看动量冠军哪怕已回落，"
-             "盈利收益率 看最便宜的价值股）。板块无基本面，选价值维度时板块表回落到综合分。",
+             "价值分 看行业内最便宜的）。价值分=forward盈利收益率+EV/EBITDA收益率的行业内百分位。"
+             "板块无基本面，选价值维度时板块表回落到综合分。",
     )
     sort_col = SORT_OPTIONS[sort_label]
 
@@ -1465,8 +1470,8 @@ def render_market_screen():
     n_pe = int(stock_str["pe"].notna().sum()) if "pe" in stock_str.columns else 0
     fund_date = str(latest_fund["date"].iloc[0]) if latest_fund is not None and not latest_fund.empty else "无"
     st.caption(f"共 {len(stock_str)} 只个股参与排名，截至各自最新交易日。当前按【{sort_label}】排序。"
-               + (f"综合分=动量半+价值半；价值用 {fund_date} 基本面快照的远期 PE（缺失回退 trailing），"
-                  f"{n_pe} 只有有效 PE（负盈利且无正远期 PE 者价值分缺失，综合分退回只用动量）。" if has_val
+               + (f"综合分=动量半+价值半；价值用 {fund_date} 快照的 forward盈利收益率+EV/EBITDA 双口径"
+                  f"（{n_pe} 只有有效远期PE；两口径全缺者价值分空缺、综合分退回只用动量）。" if has_val
                   else "（基本面表暂无数据，综合分为纯动量；跑 run_daily 记录基本面后生效。）"))
     ranked = _sort_strength(stock_str, sort_col)
     n = st.slider("每侧显示数量", 5, 30, 15, key="screen_n")

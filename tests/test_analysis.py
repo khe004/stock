@@ -170,6 +170,36 @@ def test_compute_strength_value_factor():
     assert list(df.index)[0] == "A"
 
 
+def test_compute_strength_dual_value_metrics():
+    """价值分融合 forward盈利收益率 + EV/EBITDA：一次性收益压低的假便宜 PE 被 EV/EBITDA 制衡。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["FAKE", "REAL", "MID"]}
+    # FAKE：一次性收益灌低 PE（PE 5 假便宜），但 EV/EBITDA 40 真贵
+    # REAL：PE 12、EV/EBITDA 8，两口径都扎实便宜
+    fund = pd.DataFrame(
+        {"forward_pe": [5.0, 12.0, 20.0], "ev_to_ebitda": [40.0, 8.0, 15.0]},
+        index=["FAKE", "REAL", "MID"],
+    )
+    df = compute_strength(px, fundamentals=fund)
+    assert "ev_ebitda" in df.columns and "ebitda_yield" in df.columns
+    # REAL 综合两口径最便宜 → 价值分最高；FAKE 的假便宜被 EV/EBITDA 拉回，未能凭低PE夺魁
+    assert df.loc["REAL", "value_score"] > df.loc["FAKE", "value_score"]
+    assert df.loc["FAKE", "value_score"] < 1.0
+
+
+def test_compute_strength_ebitda_only_when_no_pe():
+    """无 PE 但有 EV/EBITDA（如亏损但经营正常）时，价值分仍可由 EV/EBITDA 单独给出。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["A", "B"]}
+    fund = pd.DataFrame(
+        {"forward_pe": [None, None], "ev_to_ebitda": [8.0, 20.0]},
+        index=["A", "B"],
+    )
+    df = compute_strength(px, fundamentals=fund)
+    assert df["value_score"].notna().all()  # 靠 EV/EBITDA 也能给价值分
+    assert df.loc["A", "value_score"] > df.loc["B", "value_score"]  # A 的 EV/EBITDA 更低=更便宜
+
+
 def test_compute_strength_prefers_forward_pe():
     """默认用 forward PE：成长股 trailing 畸高但 forward 便宜时，按 forward 判价值。"""
     n = 300
