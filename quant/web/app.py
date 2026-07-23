@@ -1410,13 +1410,24 @@ def render_market_screen():
                   delta="偏强" if breadth["above"] * 2 >= breadth["total"] else "偏弱",
                   delta_color="normal" if breadth["above"] * 2 >= breadth["total"] else "inverse")
 
+    # ── 排序依据（同时作用于板块表与个股榜）──
+    SORT_OPTIONS = {"综合分": "composite", "12-1动量": "mom",
+                    "52周位置": "pos_52w", "距200日均线": "dist_ma"}
+    sort_label = st.selectbox(
+        "排序依据", list(SORT_OPTIONS), index=0, key="screen_sort",
+        help="综合分=三维等权融合；选单一维度可看纯榜单（如按 12-1动量 看动量冠军，"
+             "哪怕它已从高点回落）",
+    )
+    sort_col = SORT_OPTIONS[sort_label]
+
     # ── 板块强弱 ──
     st.subheader("板块强弱")
     sect_str = compute_strength(sect_prices)
     if sect_str.empty:
         st.warning("板块行情不足，先运行 python run_daily.py 拉取数据")
     else:
-        _render_strength_table(sect_str, label_map=SECTOR_NAMES)
+        sect_sorted = sect_str.dropna(subset=[sort_col]).sort_values(sort_col, ascending=False)
+        _render_strength_table(sect_sorted, label_map=SECTOR_NAMES)
 
     # ── 个股强弱榜 ──
     st.subheader("个股强弱榜（S&P500 候选池）")
@@ -1430,15 +1441,17 @@ def render_market_screen():
         return
     sec_map = _stock_sector_map()
     stock_str["行业"] = [sec_map.get(s, "") for s in stock_str.index]
-    st.caption(f"共 {len(stock_str)} 只个股参与排名（历史足够者），截至各自最新交易日。")
+    st.caption(f"共 {len(stock_str)} 只个股参与排名（历史足够者），截至各自最新交易日。"
+               f"当前按【{sort_label}】排序。")
+    ranked = stock_str.dropna(subset=[sort_col]).sort_values(sort_col, ascending=False)
     n = st.slider("每侧显示数量", 5, 30, 15, key="screen_n")
     col_a, col_b = st.columns(2)
     with col_a:
-        st.markdown("**🟢 最强（综合分居前）**")
-        _render_strength_table(stock_str.head(n))
+        st.markdown(f"**🟢 最强（{sort_label}居前）**")
+        _render_strength_table(ranked.head(n))
     with col_b:
-        st.markdown("**🔴 最弱（综合分垫底）**")
-        _render_strength_table(stock_str.tail(n).iloc[::-1])
+        st.markdown(f"**🔴 最弱（{sort_label}垫底）**")
+        _render_strength_table(ranked.tail(n).iloc[::-1])
 
 
 PAGES = {
