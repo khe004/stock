@@ -21,4 +21,6 @@ REGISTRY: dict[str, type[Strategy]] = {
 def build(name: str, params: dict) -> Strategy:
     if name not in REGISTRY:
         raise KeyError(f"未知策略: {name}，可用: {list(REGISTRY)}")
-    return REGISTRY[name](**{k: v for k, v in params.items() if k != "groups"})
+    # groups 是作用范围、notify 是通知开关——都不是策略参数，构造时剔除
+    meta = {"groups", "notify"}
+    return REGISTRY[name](**{k: v for k, v in params.items() if k not in meta})

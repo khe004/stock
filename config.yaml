@@ -82,6 +82,7 @@ watchlist:
 strategies:
   sma_cross:
     enabled: true
+    notify: false          # 仅观察：信号入库但不发邮件/推送
     fast: 20
     slow: 60
     groups: [broad, themes, assets]
@@ -93,6 +94,7 @@ strategies:
     groups: [sectors]
   rsi_reversal:
     enabled: true
+    notify: false          # 仅观察：信号入库但不发邮件/推送
     period: 14
     oversold: 30
     overbought: 70
@@ -111,6 +113,7 @@ strategies:
     groups: [broad, assets]
   vix_regime:             # VIX 情绪/风险提醒：恐慌区、自满区、期限倒挂
     enabled: true
+    notify: false          # 仅观察：信号入库但不发邮件/推送
     vix: ^VIX
     vix3m: ^VIX3M
     panic: 30             # 恐慌阈值
@@ -119,6 +122,7 @@ strategies:
     groups: [volatility]
   stock_momentum:         # 个股横截面动量：动态流动性池 + 12-1 动量 + 大盘过滤
     enabled: true
+    notify: false          # 仅观察：信号入库但不发邮件/推送
     universe_file: universe_sp500.yaml
     pool_size: 100        # 每月按成交额取前 N 构成选股池（point-in-time）
     liquidity_window: 20  # 成交额排名窗口（日）

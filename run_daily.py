@@ -57,6 +57,46 @@ def format_message(rows) -> str:
     return "\n".join(lines)
 
 
+def build_market_overview(prices: dict, cfg) -> str:
+    """生成市场概览文本（大盘/VIX/板块宽度/最强弱/利率），附在每日邮件里。"""
+    from quant.analysis.market import sector_breadth, yield_curve_spread
+
+    def chg(sym):
+        df = prices.get(sym)
+        if df is None or len(df) < 2:
+            return None
+        c = df["close"]
+        return float(c.iloc[-1]), float(c.iloc[-1] / c.iloc[-2] - 1)
+
+    lines = ["———— 市场概览 ————"]
+    parts = [f"{s} ${v[0]:,.2f}({v[1]:+.1%})"
+             for s in cfg.watchlist.get("broad", []) if (v := chg(s))]
+    if parts:
+        lines.append("大盘: " + " | ".join(parts))
+    vix = prices.get("^VIX")
+    if vix is not None and not vix.empty:
+        lines.append(f"VIX 恐慌指数: {float(vix['close'].iloc[-1]):.1f}")
+    sect = {s: prices[s]["close"] for s in cfg.watchlist.get("sectors", []) if s in prices}
+    if sect:
+        b = sector_breadth(sect)
+        if b["total"]:
+            lines.append(f"板块宽度: {b['above']}/{b['total']} 只站上 200 日均线")
+        rets = {s: float(c.iloc[-1] / c.iloc[-2] - 1) for s, c in sect.items() if len(c) >= 2}
+        if rets:
+            hi, lo = max(rets, key=rets.get), min(rets, key=rets.get)
+            lines.append(f"今日板块: 最强 {hi}({rets[hi]:+.1%}) / 最弱 {lo}({rets[lo]:+.1%})")
+    tnx, irx = prices.get("^TNX"), prices.get("^IRX")
+    if tnx is not None and not tnx.empty:
+        line = f"10 年期美债收益率: {float(tnx['close'].iloc[-1]):.2f}%"
+        if irx is not None and not irx.empty:
+            sp = yield_curve_spread(tnx["close"], irx["close"])
+            if sp is not None:
+                line += f" | 期限利差(10Y-3M): {sp:+.2f}pt{'（倒挂）' if sp < 0 else ''}"
+        lines.append(line)
+    lines.append("\n（更多见 Streamlit 面板「市场概览」页）")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="每日投资信号")
     parser.add_argument("--date", help="只保留该日期(YYYY-MM-DD)的信号，默认取行情最新一天（用于补跑）")
@@ -131,15 +171,28 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if not args.no_notify:
+        # 仅观察策略（config 里 notify: false）：信号入库但不推送
+        observe_only = {name for name, p in cfg.enabled_strategies()
+                        if not p.get("notify", True)}
         pending = store.unnotified_signals(conn)
-        if pending:
-            subject = f"📈 投资信号 {as_of}（{len(pending)} 条）"
-            ok = dispatch(cfg, subject, format_message(pending))
-            if ok:
-                store.mark_notified(conn, [r["id"] for r in pending])
-            log.info("推送 %d 条信号%s", len(pending), "" if ok else "（部分渠道失败，下次运行重试）")
-        else:
-            log.info("今日无新信号")
+        notify_rows = [r for r in pending if r["strategy"] not in observe_only]
+        observe_rows = [r for r in pending if r["strategy"] in observe_only]
+        # 仅观察信号直接标记已通知（不推送、也不再累积重发）
+        if observe_rows:
+            store.mark_notified(conn, [r["id"] for r in observe_rows])
+            log.info("仅观察策略 %d 条信号已入库不推送", len(observe_rows))
+
+        # 每日邮件 = 市场概览 + 可推送信号（保证每天一封）
+        signal_text = (format_message(notify_rows) if notify_rows
+                       else f"📭 今日无新信号（{as_of}）")
+        body = signal_text + "\n\n" + build_market_overview(prices, cfg)
+        subject = (f"📈 投资日报 {as_of}（{len(notify_rows)} 条信号）" if notify_rows
+                   else f"📊 投资日报 {as_of}（市场概览）")
+        ok = dispatch(cfg, subject, body)
+        if ok and notify_rows:
+            store.mark_notified(conn, [r["id"] for r in notify_rows])
+        log.info("每日邮件已发送%s（%d 条可推信号）",
+                 "" if ok else "（部分渠道失败，下次重试）", len(notify_rows))
         if failed:
             shown = ", ".join(failed[:20]) + (f" 等 {len(failed)} 个" if len(failed) > 20 else "")
             dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {shown}，信号可能不完整")
