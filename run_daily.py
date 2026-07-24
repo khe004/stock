@@ -59,7 +59,7 @@ def format_message(rows) -> str:
 
 def build_market_overview(prices: dict, cfg) -> str:
     """生成市场概览文本（大盘/VIX/板块宽度/最强弱/利率），附在每日邮件里。"""
-    from quant.analysis.market import sector_breadth, yield_curve_spread
+    from quant.analysis.market import etf_label, sector_breadth, yield_curve_spread
 
     def chg(sym):
         df = prices.get(sym)
@@ -84,7 +84,8 @@ def build_market_overview(prices: dict, cfg) -> str:
         rets = {s: float(c.iloc[-1] / c.iloc[-2] - 1) for s, c in sect.items() if len(c) >= 2}
         if rets:
             hi, lo = max(rets, key=rets.get), min(rets, key=rets.get)
-            lines.append(f"今日板块: 最强 {hi}({rets[hi]:+.1%}) / 最弱 {lo}({rets[lo]:+.1%})")
+            lines.append(f"今日板块: 最强 {etf_label(hi)}({rets[hi]:+.1%}) / "
+                         f"最弱 {etf_label(lo)}({rets[lo]:+.1%})")
     tnx, irx = prices.get("^TNX"), prices.get("^IRX")
     if tnx is not None and not tnx.empty:
         line = f"10 年期美债收益率: {float(tnx['close'].iloc[-1]):.2f}%"

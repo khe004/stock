@@ -2,6 +2,24 @@
 
 import pandas as pd
 
+# ETF/标的中文名（面板与邮件共用，避免只显示 XLK 这种记不住的代码）
+ETF_NAMES = {
+    # 11 个 SPDR 行业
+    "XLK": "科技", "XLV": "医疗", "XLF": "金融", "XLY": "可选消费",
+    "XLP": "必需消费", "XLE": "能源", "XLI": "工业", "XLB": "材料",
+    "XLU": "公用事业", "XLRE": "房地产", "XLC": "通信",
+    # 大盘/成长/主题/资产
+    "SPY": "标普500", "QQQ": "纳指100", "IWM": "罗素2000", "DIA": "道指",
+    "SMH": "半导体", "SOXX": "半导体", "IGV": "软件", "XBI": "生物科技",
+    "TLT": "长债", "GLD": "黄金", "IBIT": "比特币",
+}
+
+
+def etf_label(sym: str) -> str:
+    """代码 + 中文名，如 'XLK 科技'；无名则原样返回。"""
+    name = ETF_NAMES.get(sym)
+    return f"{sym} {name}" if name else sym
+
 
 def range_position(prices: pd.Series, window: int = 252) -> float | None:
     """最新价在过去 window 个交易日 [低点, 高点] 区间中的位置，0~1。

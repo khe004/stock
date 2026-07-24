@@ -17,7 +17,7 @@ from quant.analysis.correlation import (
     correlation_matrix,
     strategy_return_series,
 )
-from quant.analysis.market import range_position, sector_breadth, yield_curve_spread
+from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.analysis.screening import compute_strength, market_regime
 from quant.backtest.engine import (
@@ -337,7 +337,7 @@ def render_momentum_rank():
 
     table = pd.DataFrame({
         "排名": range(1, len(latest) + 1),
-        "标的": latest.index,
+        "板块": [etf_label(s) for s in latest.index],
         "12-1 动量": latest.values,
         "状态": ["✅ 前3" if i < MOM_TOP_N else "" for i in range(len(latest))],
     })
@@ -383,7 +383,7 @@ def render_momentum_rank():
     growth_rows = [(s, v) for s, v in agg_latest.items() if s not in agg_safe]
     gtable = pd.DataFrame({
         "排名": range(1, len(growth_rows) + 1),
-        "成长ETF": [s for s, _ in growth_rows],
+        "成长ETF": [etf_label(s) for s, _ in growth_rows],
         "12-1 动量": [v for _, v in growth_rows],
         "状态": ["🟢 进攻持有" if (i < agg_tn and v > 0) else ("⚠️ 动量为负" if v <= 0 else "")
                  for i, (_, v) in enumerate(growth_rows)],
@@ -1507,11 +1507,7 @@ QQQ 作为宽基会自动纳入新赢家。这是任何**固定小宇宙**动量
 """)
 
 
-SECTOR_NAMES = {
-    "XLK": "科技", "XLV": "医疗", "XLF": "金融", "XLY": "可选消费",
-    "XLP": "必需消费", "XLE": "能源", "XLI": "工业", "XLB": "材料",
-    "XLU": "公用事业", "XLRE": "房地产", "XLC": "通信",
-}
+SECTOR_NAMES = ETF_NAMES  # 中文名映射统一在 analysis/market.py（面板与邮件共用）
 
 
 def _stock_sector_map() -> dict[str, str]:
