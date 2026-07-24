@@ -363,6 +363,45 @@ def render_momentum_rank():
     rfig.update_layout(height=500, hovermode="x unified")
     st.plotly_chart(rfig, width="stretch")
 
+    # ── 进攻档成长 ETF 池的 12-1 动量排名（独立一份，不与板块混）──
+    st.divider()
+    st.subheader("进攻档成长 ETF · 12-1 月度动量")
+    agg_p = strategy_params.get("aggressive_mom", {})
+    agg_lb, agg_sk = agg_p.get("lookback_days", 252), agg_p.get("skip_days", 21)
+    agg_tn = agg_p.get("top_n", 1)
+    agg_safe = set(agg_p.get("safe_assets", ["TLT"]))
+    agg_closes = group_closes("aggressive_growth", adjusted=True)
+    agg_mom = (agg_closes.shift(agg_sk) / agg_closes.shift(agg_lb) - 1).dropna(how="all") \
+        if not agg_closes.empty else pd.DataFrame()
+    if agg_mom.empty:
+        st.warning(f"进攻档 ETF 行情不足（需要至少 {agg_lb} 个交易日）")
+        return
+    agg_latest = agg_mom.iloc[-1].dropna().sort_values(ascending=False)
+    as_of_agg = agg_mom.index[-1].strftime("%Y-%m-%d")
+    st.caption(f"截至 {as_of_agg}，进攻档在成长 ETF 里持有 12-1 动量最强的前 {agg_tn} 只；"
+               f"现金感知——需动量为正才买，成长全负则切正动量避险，避险也负则持现金。")
+    growth_rows = [(s, v) for s, v in agg_latest.items() if s not in agg_safe]
+    gtable = pd.DataFrame({
+        "排名": range(1, len(growth_rows) + 1),
+        "成长ETF": [s for s, _ in growth_rows],
+        "12-1 动量": [v for _, v in growth_rows],
+        "状态": ["🟢 进攻持有" if (i < agg_tn and v > 0) else ("⚠️ 动量为负" if v <= 0 else "")
+                 for i, (_, v) in enumerate(growth_rows)],
+    })
+
+    def agg_style(row):
+        bg = BUY_BG if (row["排名"] <= agg_tn and row["12-1 动量"] > 0) else ""
+        return [f"background-color: {bg}"] * len(row)
+
+    st.dataframe(gtable.style.apply(agg_style, axis=1).format({"12-1 动量": "{:+.1%}"}),
+                 width="stretch", hide_index=True)
+    safe_rows = [(s, v) for s, v in agg_latest.items() if s in agg_safe]
+    if safe_rows:
+        sname, sval = safe_rows[0]
+        state = "🟢 可避险" if sval > 0 else "🔴 动量为负 → 持现金"
+        st.caption(f"避险资产 {sname}：12-1 动量 {sval:+.1%}（{state}）——"
+                   f"成长全负时仅在避险动量为正才切入，否则持现金。")
+
 
 def _all_strategy_signals() -> tuple[list[Signal], dict[str, str]]:
     """在全量历史上为全部启用策略重算信号（与回测同一套 generate 逻辑），
@@ -724,8 +763,11 @@ def risk_table(rows: dict[str, pd.Series]):
     """rows: 名称 -> 权益曲线（同一本金起步）。逐列高亮最优值。"""
     table = pd.DataFrame({name: equity_metrics(eq, INITIAL_CASH) for name, eq in rows.items()}).T
     table = table.rename(columns=RISK_COLS)
+    table.insert(0, "对象", table.index)  # 名称作为带表头的首列，避免索引列过窄显示不全
 
     def highlight(col):
+        if col.name == "对象":
+            return [""] * len(col)
         best = col.min() if col.name == "年化波动" else col.max()
         return [f"background-color: {BUY_BG}; font-weight: bold" if v == best else "" for v in col]
 
@@ -733,7 +775,8 @@ def risk_table(rows: dict[str, pd.Series]):
               .format({"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
                        "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}))
     st.markdown("**风险收益对比**（绿色=该列最优；Calmar=年化收益÷最大回撤，回撤小、收益稳才高）")
-    st.dataframe(styler, width="stretch")
+    st.dataframe(styler, width="stretch", hide_index=True,
+                 column_config={"对象": st.column_config.Column(width="medium")})
 
 
 def trades_table(trades: list[dict], with_symbol: bool = False):
@@ -1113,9 +1156,32 @@ def _render_vix_bt(params: dict):
                "重点看有恐慌事件的区间（如 2020、2022）里回撤是否更小。")
 
 
+STRATEGY_CATEGORIES = {
+    "研究中": ["cross_asset_mom", "aggressive_mom", "momentum", "dual_momentum", "low_vol"],
+    "定投": ["smart_dca"],
+    "仅观察": ["stock_momentum", "sma_cross", "rsi_reversal", "vix_regime"],
+}
+STRATEGY_CATEGORY_NOTE = {
+    "研究中": "在风险或收益上有可取之处、仍在打磨（稳健档 cross_asset_mom、进攻档 "
+              "aggressive_mom、板块 12-1 momentum、GEM dual_momentum、低波动 low_vol）。",
+    "定投": "定期定额、非择时——单独一类（口径以后可再细化）。",
+    "仅观察": "早期测试或已验证无可复制的独立 alpha，仅作观察对照，勿据此实盘。",
+}
+
+
 def render_backtest():
     st.title("回测")
-    strategy_name = st.selectbox("策略", strategy_names)
+    cat = st.radio("策略分类", list(STRATEGY_CATEGORIES), horizontal=True, key="bt_category")
+    st.caption(STRATEGY_CATEGORY_NOTE.get(cat, ""))
+    options = [s for s in STRATEGY_CATEGORIES[cat] if s in strategy_params]
+    # 兜底：未归类的启用策略并入"研究中"，避免遗漏
+    if cat == "研究中":
+        categorized = {s for lst in STRATEGY_CATEGORIES.values() for s in lst}
+        options += [s for s in strategy_names if s not in categorized]
+    if not options:
+        st.info("该分类下暂无启用的策略")
+        return
+    strategy_name = st.selectbox("策略", options)
     params = strategy_params[strategy_name]
     if strategy_name == "stock_momentum":
         st.warning(
