@@ -84,18 +84,19 @@ class AggressiveMomentum(Strategy):
             # 仍不满 = 持现金（picks 可少于 top_n，甚至为空）
 
             top = set(picks)
-            # 先卖后买
+            # 先卖后买——只在标的跌出组合时卖出并移除持仓（持续持有的不重复发信号）
             for sym in list(held):
-                if sym not in top and pd.notna(closes.at[ts, sym]):
-                    sym_mom = float(mom.at[ts, sym]) if pd.notna(mom.at[ts, sym]) else 0.0
-                    if not picks:
-                        reason = (f"{sym}：成长与避险资产动量全负，清仓持现金"
-                                  f"（{sym} 12-1动量 {sym_mom:+.1%}）")
-                    else:
-                        reason = (f"{sym}：12-1 动量 {sym_mom:+.1%}，"
-                                  f"跌出进攻组合，调出")
-                    signals.append(self._sig(ts, sym, closes, mom, SELL, reason, sym_mom))
-                held.discard(sym)
+                if sym not in top:
+                    if pd.notna(closes.at[ts, sym]):
+                        sym_mom = float(mom.at[ts, sym]) if pd.notna(mom.at[ts, sym]) else 0.0
+                        if not picks:
+                            reason = (f"{sym}：成长与避险资产动量全负，清仓持现金"
+                                      f"（{sym} 12-1动量 {sym_mom:+.1%}）")
+                        else:
+                            reason = (f"{sym}：12-1 动量 {sym_mom:+.1%}，"
+                                      f"跌出进攻组合，调出")
+                        signals.append(self._sig(ts, sym, closes, mom, SELL, reason, sym_mom))
+                    held.discard(sym)
 
             for sym in picks:
                 if sym not in held and pd.notna(closes.at[ts, sym]):

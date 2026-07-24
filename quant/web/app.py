@@ -917,10 +917,14 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
             held.setdefault(s.symbol)
         else:
             held.pop(s.symbol, None)
+    in_window = [s for s in sigs if start_str <= s.date <= end_str]
+    # 防御：区间首日已有真实买入信号的标的不再合成买入，否则同标的当天被买两次，
+    # 组合引擎把现金对半分且第二次覆盖第一次，导致起始权益凭空减半。
+    bought_on_start = {s.symbol for s in in_window
+                       if s.date == start_str and s.direction == BUY}
     synth = [Signal(date=start_str, symbol=sym, strategy=strategy_name, direction=BUY,
                     price=0.0, strength=0.5, reason="区间起点已持有（承接区间前信号）")
-             for sym in held]
-    in_window = [s for s in sigs if start_str <= s.date <= end_str]
+             for sym in held if sym not in bought_on_start]
 
     window_prices = {s: df.loc[start_str:end_str] for s, df in prices.items()}
     window_prices = {s: df for s, df in window_prices.items() if not df.empty}
