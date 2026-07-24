@@ -1,13 +1,14 @@
 #!/bin/bash
 # macOS 一键部署：创建虚拟环境、安装依赖、注册 launchd 每日定时任务。
-# 用法: bash scripts/setup_mac.sh [HH:MM]   默认每天 15:00（盘后）运行
-# 注意：时间是本机本地时间，需确保在美股收盘后当日行情已定稿（如在美东时区，
-#       15:00 是盘中、当日K线未定稿，应改到收盘后如 16:30 之后）。
+# 用法: bash scripts/setup_mac.sh [HH:MM]   默认每天 14:00（盘后）运行
+# 注意：时间是本机本地时间，需在美股收盘后、当日行情定稿后运行。
+#       美西(PT)收盘 13:00 → 14:00 运行(收盘后1h，yfinance已定稿)；
+#       美东(ET)收盘 16:00 → 应改到 16:30 之后。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 PROJECT_DIR="$(pwd)"
-RUN_AT="${1:-15:00}"
+RUN_AT="${1:-14:00}"
 HOUR="${RUN_AT%%:*}"
 MINUTE="${RUN_AT##*:}"
 LABEL="com.quant.daily"
