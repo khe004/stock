@@ -31,7 +31,7 @@ from quant.strategies.base import BUY, Signal, price_series
 
 # 与 app.py 保持一致的分类
 PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum", "low_vol",
-                        "cross_asset_mom"}
+                        "cross_asset_mom", "aggressive_mom"}
 
 
 def _portfolio_return_series(

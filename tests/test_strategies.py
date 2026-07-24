@@ -620,3 +620,58 @@ def test_cross_asset_mom_sell_on_exit(cross_asset_prices):
     assert spy_sells, "SPY 动量转弱后应有卖出信号"
 
 
+
+
+# ── aggressive_mom 进攻档测试 ──────────────────────────────────
+
+def _agg_prices(g1, g2, safe, n=350):
+    return {
+        "G1": make_df_start(100 * g1 ** np.arange(n), start="2023-01-02"),
+        "G2": make_df_start(100 * g2 ** np.arange(n), start="2023-01-02"),
+        "SAFE": make_df_start(100 * safe ** np.arange(n), start="2023-01-02"),
+    }
+
+
+def test_aggressive_mom_top1_picks_strongest_growth():
+    """top_n=1：成长都为正时，只选动量最强的 1 只成长，不碰避险。"""
+    from quant.strategies.aggressive import AggressiveMomentum
+    prices = _agg_prices(1.004, 1.002, 1.001)  # G1 最强、都为正
+    signals = AggressiveMomentum(lookback_days=60, skip_days=5, top_n=1,
+                                 safe_assets=("SAFE",)).generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys, "有正动量成长时应买入"
+    assert {s.symbol for s in buys} == {"G1"}, "top1 应只选动量最强的成长 G1"
+
+
+def test_aggressive_mom_switch_to_safe():
+    """成长动量全负、避险为正 → 切入避险。"""
+    from quant.strategies.aggressive import AggressiveMomentum
+    prices = _agg_prices(0.998, 0.997, 1.002)  # 成长跌、避险涨
+    signals = AggressiveMomentum(lookback_days=60, skip_days=5, top_n=1,
+                                 safe_assets=("SAFE",)).generate(prices)
+    bought = {s.symbol for s in signals if s.direction == BUY}
+    assert "SAFE" in bought, "成长全负时应切入正动量避险"
+    assert "G1" not in bought and "G2" not in bought, "负动量成长不应买入"
+
+
+def test_aggressive_mom_cash_when_all_negative():
+    """现金感知：成长与避险都为负 → 不买入（持现金），绝不硬拿下跌的避险。"""
+    from quant.strategies.aggressive import AggressiveMomentum
+    prices = _agg_prices(0.998, 0.997, 0.996)  # 全跌，含避险
+    signals = AggressiveMomentum(lookback_days=60, skip_days=5, top_n=1,
+                                 safe_assets=("SAFE",)).generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys == [], "成长与避险都负时应持现金，不发买入"
+
+
+def test_aggressive_mom_reason_and_strength():
+    """reason 含数值、strength 在 (0,1]。"""
+    from quant.strategies.aggressive import AggressiveMomentum
+    prices = _agg_prices(1.004, 1.002, 1.001)
+    signals = AggressiveMomentum(lookback_days=60, skip_days=5, top_n=1,
+                                 safe_assets=("SAFE",)).generate(prices)
+    buys = [s for s in signals if s.direction == BUY]
+    assert buys
+    for s in buys:
+        assert "动量" in s.reason and "%" in s.reason
+        assert 0 < s.strength <= 1.0

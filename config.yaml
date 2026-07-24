@@ -56,6 +56,14 @@ watchlist:
     - RSP               # 标普500等权（= 我们手算的等权基准）
     - USMV              # 最小波动（low_vol 的官方对标）
     - MTUM              # 动量因子
+  aggressive_growth:    # 进攻档宇宙：成长/科技 ETF（进攻）+ TLT（避险）
+    - QQQ               # 纳指100
+    - XLK               # 科技
+    - SMH               # 半导体
+    - IGV               # 软件
+    - XLY               # 可选消费
+    - XBI               # 生物科技
+    - TLT               # 长债（现金感知避险，非进攻）
   volatility:           # 波动率指数（不可交易，用于情绪/风险信号）
     - ^VIX              # 恐慌指数
     - ^VIX3M            # 三个月期 VIX
@@ -129,7 +137,7 @@ strategies:
     groups: [sectors, assets]  # 行业 ETF + 资产类（含 TLT 长债/GLD 黄金）：
                             # 扩宇宙让低波动能选到非股票资产，降低与动量家族的相关性
                             # （sectors-only 时因同为长多股票、共享市场beta，相关仍约0.5）
-  cross_asset_mom:            # 跨资产 12-1 月度动量轮动 + 绝对动量开关
+  cross_asset_mom:            # 跨资产 12-1 月度动量轮动 + 绝对动量开关（稳健档）
     enabled: true             # 首个干净跑赢公平基准的动量策略
     lookback_days: 252        # 动量回看约 12 个月（与 momentum/stock_momentum 一致）
     skip_days: 21             # 跳过最近约 1 个月（12-1 口径，避开短期反转）
@@ -138,6 +146,16 @@ strategies:
     groups: [cross_asset_mom_universe]  # 9 类低相关资产宇宙
                               # 实测 top3+abs：+237%/夏普0.80/回撤-21.5%/Calmar0.52
                               # 跑赢等权全资产基准（+172%/0.39），动量真加了信息
+  aggressive_mom:             # 进攻档：成长 ETF 集中 12-1 动量 + 现金感知避险
+    enabled: true             # 目标够 QQQ 增长同时控回撤
+    lookback_days: 252        # 动量回看约 12 个月
+    skip_days: 21             # 跳过最近约 1 个月（12-1 口径）
+    top_n: 1                  # 集中持有动量最强的 1 只成长 ETF
+    safe_assets: [TLT]        # 现金感知避险：成长转负切正动量避险，避险也负则持现金
+    groups: [aggressive_growth]  # 成长/科技 ETF + TLT 避险
+                              # 实测 top1：+766%/年化20.6%/回撤-34%/Calmar0.60
+                              # 跑赢 QQQ 收益(+635%)且回撤≈QQQ；walk-forward 两段都成立
+                              # 诚实：集中成长押注，成长失宠会落后，比 cross_asset_mom 波动大
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
