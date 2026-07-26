@@ -99,7 +99,10 @@ class AggressiveMomentum(Strategy):
                 if sym not in top:
                     if pd.notna(closes.at[ts, sym]):
                         sym_mom = float(mom.at[ts, sym]) if pd.notna(mom.at[ts, sym]) else 0.0
-                        if picks == [self.cash_asset]:
+                        if sym == self.cash_asset:
+                            reason = (f"{sym}：成长/避险动量转正，现金等价调出，"
+                                      f"资金切回进攻组合")
+                        elif picks == [self.cash_asset]:
                             reason = (f"{sym}：成长与避险动量全负，切换至现金等价 "
                                       f"{self.cash_asset}（吃短债利率）")
                         elif not picks:
