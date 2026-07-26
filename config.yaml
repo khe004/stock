@@ -105,7 +105,7 @@ strategies:
     fast: 20
     slow: 60
     groups: [broad]
-  dual_momentum:          # GEM 双动量：动量转负切换避险资产
+  dual_momentum:          # GEM 双动量：动量转负切避险(现金感知，避险也负则持现金)
     enabled: true
     lookback_days: 252    # 约 12 个月
     risk_assets: [SPY, QQQ]

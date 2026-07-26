@@ -183,7 +183,7 @@ def test_dual_momentum_switches_to_safe_and_back():
     prices = {
         "SPY": make_df_start(up + crash + recover),
         "QQQ": make_df_start([100.0] * n),
-        "TLT": make_df_start([100.0] * n),
+        "TLT": make_df_start(list(np.linspace(100, 130, n))),  # 温和上涨→避险期动量为正
     }
     strat = DualMomentum(lookback_days=60, risk_assets=["SPY", "QQQ"], safe_asset="TLT")
     signals = strat.generate(prices)
@@ -197,6 +197,21 @@ def test_dual_momentum_switches_to_safe_and_back():
     assert any(sym in ("SPY", "QQQ") for sym in after_tlt[1:]), "反弹后应切回风险资产"
     sells = [s for s in signals if s.direction == SELL]
     assert sells, "换仓应先产生卖出信号"
+
+
+def test_dual_momentum_cash_when_safe_also_negative():
+    """现金感知：风险资产与避险资产动量都为负 → 持现金（不买入下跌的避险资产）。"""
+    from quant.strategies.dual_momentum import DualMomentum
+    n = 250
+    prices = {
+        "SPY": make_df_start(list(np.linspace(150, 90, n))),   # 跌
+        "QQQ": make_df_start(list(np.linspace(150, 100, n))),  # 跌
+        "TLT": make_df_start(list(np.linspace(120, 90, n))),   # 避险也跌（动量为负）
+    }
+    strat = DualMomentum(lookback_days=60, risk_assets=["SPY", "QQQ"], safe_asset="TLT")
+    signals = strat.generate(prices)
+    bought = {s.symbol for s in signals if s.direction == BUY}
+    assert "TLT" not in bought, "避险资产动量也为负时应持现金，不买入下跌的 TLT"
 
 
 def test_smart_dca_monthly_signals_and_pause():

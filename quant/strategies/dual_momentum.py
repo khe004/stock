@@ -1,4 +1,10 @@
-"""双动量 GEM：每月选动量最强的风险资产，动量转负切换到避险资产。"""
+"""双动量 GEM：每月选动量最强的风险资产，动量转负切换到避险资产（现金感知）。
+
+现金感知避险：风险资产全部动量转负时切避险资产（TLT），但若避险资产自己动量也为负
+则持现金——不硬抱在下跌的避险资产上。实测比无条件切 TLT 全面更优（尤其 2022 加息年
+TLT 也崩，切 TLT 亏 -25% vs 现金感知 -13%；全程 +367%→+415%、夏普 0.78→0.85）。
+与 aggressive_mom / cross_asset_mom 的避险逻辑一致。
+"""
 
 import pandas as pd
 
@@ -36,19 +42,33 @@ class DualMomentum(Strategy):
                 continue
             best = row.idxmax()
             best_ret = float(row[best])
-            target = best if best_ret > 0 else self.safe_asset
-            if pd.isna(closes.at[ts, target]) or target == held:
-                continue
-            if target == self.safe_asset:
-                buy_reason = (f"{self.safe_asset}：风险资产动量全部转负"
-                              f"（最强 {best} 仅 {best_ret:+.1%}），切换避险")
+            if best_ret > 0:
+                target = best
             else:
-                buy_reason = (f"{target}：近{self.lookback}日动量 {best_ret:+.1%}，"
-                              f"为风险资产最强且为正，持有")
+                # 风险资产全负 → 避险，但【现金感知】：避险资产自己动量也为负则持现金，
+                # 不硬抱在下跌的避险资产上（如 2022 加息年 TLT 也崩，切 TLT 不如持现金）。
+                safe_mom = rets.at[ts, self.safe_asset]
+                target = self.safe_asset if (pd.notna(safe_mom) and safe_mom > 0) else None
+            if target == held:
+                continue
+            if target is not None and pd.isna(closes.at[ts, target]):
+                continue
+            # 先卖旧仓
             if held is not None:
-                signals.append(self._sig(ts, held, closes, SELL,
-                                         f"{held}：双动量月度调仓，切换至 {target}", best_ret))
-            signals.append(self._sig(ts, target, closes, BUY, buy_reason, best_ret))
+                sell_reason = (f"{held}：双动量月度调仓，切换至 {target}" if target
+                               else f"{held}：风险与避险资产动量全负，清仓持现金")
+                signals.append(self._sig(ts, held, closes, SELL, sell_reason, best_ret))
+            # 再买新仓（target=None 表示持现金，不买入）
+            if target is not None:
+                if target == self.safe_asset:
+                    safe_mom = float(rets.at[ts, self.safe_asset])
+                    buy_reason = (f"{self.safe_asset}：风险资产动量全部转负"
+                                  f"（最强 {best} {best_ret:+.1%}），切入避险"
+                                  f"（{self.safe_asset} 动量 {safe_mom:+.1%} 为正）")
+                else:
+                    buy_reason = (f"{target}：近{self.lookback}日动量 {best_ret:+.1%}，"
+                                  f"为风险资产最强且为正，持有")
+                signals.append(self._sig(ts, target, closes, BUY, buy_reason, best_ret))
             held = target
         return signals
 
