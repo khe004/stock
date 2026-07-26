@@ -1527,8 +1527,8 @@ def _stock_sector_map() -> dict[str, str]:
 
 
 def _render_strength_table(df: pd.DataFrame, label_map: dict | None = None):
-    """渲染强弱表：12-1动量/52周位置/距200MA/(P/E)/综合分，前景色随正负切换。
-    含 pe 列（个股）时展示 P/E；板块无基本面则不显示该列。"""
+    """渲染强弱表：12-1动量/52周位置/距200MA/(P/E)/行业内价值分位/综合分，前景色随正负切换。
+    含 pe 列（个股）时展示 P/E；含 value_score 时展示行业内价值分位（板块无基本面则不显示这两列）。"""
     d = df.copy()
     d.insert(0, "标的", [
         f"{s}｜{label_map[s]}" if label_map and s in label_map else s for s in d.index
@@ -1537,12 +1537,17 @@ def _render_strength_table(df: pd.DataFrame, label_map: dict | None = None):
     for c in ("pe", "ev_ebitda"):
         if c in d.columns:
             cols.append(c)
+    if "value_score" in d.columns:
+        cols.append("value_score")
     cols.append("composite")
     show = d[cols].rename(columns={
         "mom": "12-1动量", "pos_52w": "52周位置", "dist_ma": "距200MA",
-        "pe": "远期P/E", "ev_ebitda": "EV/EBITDA", "composite": "综合分",
+        "pe": "远期P/E", "ev_ebitda": "EV/EBITDA",
+        "value_score": "行业内价值分位", "composite": "综合分",
     })
     fmt = {"12-1动量": "{:+.1%}", "52周位置": "{:.0%}", "距200MA": "{:+.1%}", "综合分": "{:.0%}"}
+    if "行业内价值分位" in show.columns:
+        fmt["行业内价值分位"] = "{:.0%}"
     if "远期P/E" in show.columns:
         fmt["远期P/E"] = "{:.1f}"
     if "EV/EBITDA" in show.columns:
@@ -1634,9 +1639,19 @@ def render_market_screen():
     fund_date = str(latest_fund["date"].iloc[0]) if latest_fund is not None and not latest_fund.empty else "无"
     st.caption(f"共 {len(stock_str)} 只个股参与排名，截至各自最新交易日。当前按【{sort_label}】排序。"
                + (f"综合分=动量半+价值半；价值用 {fund_date} 快照的 forward盈利收益率+EV/EBITDA 双口径"
-                  f"（{n_pe} 只有有效远期PE；两口径全缺者价值分空缺、综合分退回只用动量）。" if has_val
+                  f"（{n_pe} 只有有效远期PE；两口径全缺者价值分空缺、综合分退回只用动量）。价值分已按"
+                  f"行业内百分位中性化——「行业内价值分位」列即所在行业内的便宜程度，不是全市场比。" if has_val
                   else "（基本面表暂无数据，综合分为纯动量；跑 run_daily 记录基本面后生效。）"))
-    ranked = _sort_strength(stock_str, sort_col)
+
+    sector_options = ["全部板块"] + sorted({s for s in stock_str["行业"] if s})
+    sector_filter = st.selectbox("按板块筛选", sector_options, index=0, key="screen_sector")
+    filtered = (stock_str if sector_filter == "全部板块"
+                else stock_str[stock_str["行业"] == sector_filter])
+    if filtered.empty:
+        st.warning(f"「{sector_filter}」板块无符合条件的个股")
+        return
+
+    ranked = _sort_strength(filtered, sort_col)
     n = st.slider("每侧显示数量", 5, 30, 15, key="screen_n")
     col_a, col_b = st.columns(2)
     with col_a:
