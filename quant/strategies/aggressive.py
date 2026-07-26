@@ -11,12 +11,14 @@
 选股逻辑（现金感知，是本策略的关键）：
 1. 成长里按 12-1 动量降序，取动量【为正】的前 top_n 只（默认 top_n=1，集中）。
 2. 若正动量成长不足 top_n → 用避险填补：safe_assets 里挑动量为正的按动量降序补。
-3. 【现金感知】连避险动量也为负 → 不买、持现金（名额可不满，极端全现金）。
-   绝不硬拿在下跌的避险资产——旧版硬切 TLT 在 2022 股债双杀时 TLT 也崩、导致
-   -45% 回撤；现金感知（TLT 动量也为负就持现金）把回撤降到 -34%。
+3. 【现金感知】连避险动量也为负 → 空缺名额持现金等价 BIL（1-3月短债，吃无风险利率，
+   替代 0% 现金；BIL 数据缺失才回落到真持现金）。绝不硬拿在下跌的避险资产——旧版硬
+   切 TLT 在 2022 股债双杀时 TLT 也崩、导致 -45% 回撤；现金感知把回撤降到 -34%。
+   top_n=1 全进全出，BIL 建模精确：该持现金的整段就是 100% BIL。
 
-实测结论（2015-2026，top1 + 现金感知避险 TLT）：
-- 总收益 +766%，年化 20.6%，回撤 -34%，夏普 0.82，Calmar 0.60
+实测结论（2015-2026，top1 + 现金感知避险 TLT + BIL 现金等价）：
+- 总收益 +757%，年化 20.5%，回撤 -34%，夏普 0.82，Calmar 0.60
+- （不接 BIL、防御段持 0% 现金时为 +735%/20.2%/0.81/0.59；BIL 吃利息略增厚）
 - 跑赢 QQQ 长持（+635%/18.9%/-35%/0.54）的收益，且回撤不比 QQQ 差、Calmar 更高
 - walk-forward：2015-2020 与 2021-2026 两段都跑赢/追平 QQQ，非单段运气
 
@@ -40,15 +42,18 @@ class AggressiveMomentum(Strategy):
     name = "aggressive_mom"
 
     def __init__(self, lookback_days: int = 252, skip_days: int = 21,
-                 top_n: int = 1, safe_assets=("TLT",), **_):
+                 top_n: int = 1, safe_assets=("TLT",), cash_asset: str = "BIL", **_):
         self.lookback = lookback_days
         self.skip = skip_days
         self.top_n = top_n
         self.safe_assets = list(safe_assets)
+        self.cash_asset = cash_asset
 
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         safe = [s for s in self.safe_assets if s in prices]
-        offense = [s for s in prices if s not in set(self.safe_assets)]
+        # 进攻池排除避险与现金等价（BIL），二者只作退路不参与成长排名
+        exclude = set(self.safe_assets) | {self.cash_asset}
+        offense = [s for s in prices if s not in exclude]
         if not offense:
             return []
 
@@ -81,7 +86,12 @@ class AggressiveMomentum(Strategy):
                         picks.append(s)
                     if len(picks) >= self.top_n:
                         break
-            # 仍不满 = 持现金（picks 可少于 top_n，甚至为空）
+            # 仍有空缺 → 现金感知：持现金等价 BIL 吃短债利率（替代 0% 现金）。
+            # top_n=1 时 picks 为空 → 全仓 BIL，建模精确。
+            if (len(picks) < self.top_n and self.cash_asset in prices
+                    and self.cash_asset not in picks
+                    and pd.notna(closes.at[ts, self.cash_asset])):
+                picks.append(self.cash_asset)
 
             top = set(picks)
             # 先卖后买——只在标的跌出组合时卖出并移除持仓（持续持有的不重复发信号）
@@ -89,7 +99,10 @@ class AggressiveMomentum(Strategy):
                 if sym not in top:
                     if pd.notna(closes.at[ts, sym]):
                         sym_mom = float(mom.at[ts, sym]) if pd.notna(mom.at[ts, sym]) else 0.0
-                        if not picks:
+                        if picks == [self.cash_asset]:
+                            reason = (f"{sym}：成长与避险动量全负，切换至现金等价 "
+                                      f"{self.cash_asset}（吃短债利率）")
+                        elif not picks:
                             reason = (f"{sym}：成长与避险资产动量全负，清仓持现金"
                                       f"（{sym} 12-1动量 {sym_mom:+.1%}）")
                         else:
@@ -100,8 +113,11 @@ class AggressiveMomentum(Strategy):
 
             for sym in picks:
                 if sym not in held and pd.notna(closes.at[ts, sym]):
-                    sym_mom = float(row[sym])
-                    if sym in self.safe_assets:
+                    sym_mom = float(mom.at[ts, sym]) if pd.notna(mom.at[ts, sym]) else 0.0
+                    if sym == self.cash_asset:
+                        reason = (f"{sym}：成长与避险资产动量全负，切入现金等价"
+                                  f"（吃短债利率，替代 0% 现金）")
+                    elif sym in self.safe_assets:
                         reason = (f"{sym}：成长资产动量全负，切入避险"
                                   f"（{sym} 12-1动量 {sym_mom:+.1%}）")
                     else:

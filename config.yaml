@@ -32,6 +32,8 @@ watchlist:
     - TLT               # 长期国债
     - GLD               # 黄金
     - IBIT              # 比特币
+  cash:                 # 现金等价物（防御策略的"持现金"兜底 → 改持短债吃无风险利率）
+    - BIL               # 1-3月短债 ETF（近零波动、零久期；2007+全历史，= SGOV 的长历史版）
   # ── 以下三组仅拉数据/展示与未来跨资产用，组名未被任何策略 groups 引用 → 不喂给现有策略 ──
   # （加入前用日收益相关性筛过：只留与现有池低相关=真加信息的，冗余的如 VGT/VNQ/XSD/XOP 已剔）
   cross_asset:          # 跨资产分散（跨资产动量的原料，backlog #6）
@@ -110,7 +112,8 @@ strategies:
     lookback_days: 252    # 约 12 个月
     risk_assets: [SPY, QQQ]
     safe_asset: TLT
-    groups: [broad, assets]
+    cash_asset: BIL       # 风险与避险动量全负时，持 BIL 吃短债利率（替代 0% 现金）
+    groups: [broad, assets, cash]
   vix_regime:             # VIX 情绪/风险提醒：恐慌区、自满区、期限倒挂
     enabled: true
     notify: false          # 仅观察：信号入库但不发邮件/推送
@@ -148,6 +151,10 @@ strategies:
     top_n: 3                  # 每月持有动量最强的前 3 类资产
     abs_momentum: true        # 绝对动量开关：动量为负不买入持现金（熊市保险）
     groups: [cross_asset_mom_universe]  # 9 类低相关资产宇宙
+                              # 【不接 BIL 现金等价】：top3 空槽是零散的 1/3、2/3，等权引擎
+                              # 无法干净表示；且整仓换仓日会把钱集中到不足 3 个的正动量赢家上
+                              # （各 50% 而非文档说的"空槽持现金"），+237% 有一部分来自这个
+                              # 计划外集中。加 BIL 只是部分修正反把数字降到 +200%，故不接。
                               # 实测 top3+abs：+237%/夏普0.80/回撤-21.5%/Calmar0.52
                               # 跑赢等权全资产基准（+172%/0.39），动量真加了信息
   aggressive_mom:             # 进攻档：成长 ETF 集中 12-1 动量 + 现金感知避险
@@ -156,7 +163,8 @@ strategies:
     skip_days: 21             # 跳过最近约 1 个月（12-1 口径）
     top_n: 1                  # 集中持有动量最强的 1 只成长 ETF
     safe_assets: [TLT]        # 现金感知避险：成长转负切正动量避险，避险也负则持现金
-    groups: [aggressive_growth]  # 成长/科技 ETF + TLT 避险
+    cash_asset: BIL           # 成长与避险动量全负时，持 BIL 吃短债利率（替代 0% 现金）
+    groups: [aggressive_growth, cash]  # 成长/科技 ETF + TLT 避险 + 现金等价
                               # 实测 top1：+766%/年化20.6%/回撤-34%/Calmar0.60
                               # 跑赢 QQQ 收益(+635%)且回撤≈QQQ；walk-forward 两段都成立
                               # 诚实：集中成长押注，成长失宠会落后，比 cross_asset_mom 波动大

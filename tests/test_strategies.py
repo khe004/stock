@@ -214,6 +214,25 @@ def test_dual_momentum_cash_when_safe_also_negative():
     assert "TLT" not in bought, "避险资产动量也为负时应持现金，不买入下跌的 TLT"
 
 
+def test_dual_momentum_holds_bil_as_cash_equivalent():
+    """现金等价：风险与避险都负、但提供了 BIL → 切入 BIL 吃短债利率（替代 0% 现金）。"""
+    from quant.strategies.dual_momentum import DualMomentum
+    n = 250
+    prices = {
+        "SPY": make_df_start(list(np.linspace(150, 90, n))),   # 跌
+        "QQQ": make_df_start(list(np.linspace(150, 100, n))),  # 跌
+        "TLT": make_df_start(list(np.linspace(120, 90, n))),   # 避险也跌
+        "BIL": make_df_start(list(np.linspace(100, 104, n))),  # 现金等价，缓涨=动量微正
+    }
+    strat = DualMomentum(lookback_days=60, risk_assets=["SPY", "QQQ"],
+                         safe_asset="TLT", cash_asset="BIL")
+    signals = strat.generate(prices)
+    bought = {s.symbol for s in signals if s.direction == BUY}
+    assert "BIL" in bought, "风险与避险都负时，有 BIL 应切入现金等价而非持 0% 现金"
+    assert "TLT" not in bought, "仍不硬拿下跌的避险 TLT"
+    assert any("现金等价" in s.reason for s in signals if s.symbol == "BIL")
+
+
 def test_smart_dca_monthly_signals_and_pause():
     from quant.strategies.smart_dca import SmartDca
     # 横盘（正常定投）→ 急跌（死叉沉默）→ 反弹（恢复并补投）
@@ -677,6 +696,19 @@ def test_aggressive_mom_cash_when_all_negative():
                                  safe_assets=("SAFE",)).generate(prices)
     buys = [s for s in signals if s.direction == BUY]
     assert buys == [], "成长与避险都负时应持现金，不发买入"
+
+
+def test_aggressive_mom_holds_bil_when_all_negative():
+    """现金等价：成长与避险都负、但提供了 BIL → 空缺名额切入 BIL 吃短债利率。"""
+    from quant.strategies.aggressive import AggressiveMomentum
+    prices = _agg_prices(0.998, 0.997, 0.996)  # 成长与避险全跌
+    prices["BIL"] = make_df_start(100 * 1.0002 ** np.arange(350), start="2023-01-02")  # 缓涨
+    signals = AggressiveMomentum(lookback_days=60, skip_days=5, top_n=1,
+                                 safe_assets=("SAFE",), cash_asset="BIL").generate(prices)
+    bought = {s.symbol for s in signals if s.direction == BUY}
+    assert "BIL" in bought, "成长与避险都负时，有 BIL 应切入现金等价"
+    assert "SAFE" not in bought, "仍不硬拿下跌的避险"
+    assert any("现金等价" in s.reason for s in signals if s.symbol == "BIL")
 
 
 def test_aggressive_mom_reason_and_strength():

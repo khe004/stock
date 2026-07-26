@@ -31,10 +31,17 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
   回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
 
 十个策略：sma_cross、momentum（行业 12-1 月度动量轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、
-dual_momentum（GEM）、vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）、
+dual_momentum（GEM；现金感知+BIL 现金等价：避险 TLT 也负则持短债 BIL 吃无风险利率而非 0% 现金，+419%/夏普0.85）、
+vix_regime（情绪提醒）、stock_momentum（个股 12-1 动量+流动性池）、
 low_vol（行业 ETF + 债金低波动因子，首个非动量分散因子；扩宇宙含 TLT/GLD 后与 momentum 相关约 0.26）、
 cross_asset_mom（跨资产 12-1 月度动量+绝对动量开关，稳健档，首个跑赢等权基准；9 类低相关资产宇宙）、
-aggressive_mom（进攻档：成长 ETF 集中 top1 12-1 动量+现金感知避险；实测 +766%/回撤-34%，跑赢 QQQ 收益且回撤≈QQQ、Calmar 更高；本质集中成长押注）。
+aggressive_mom（进攻档：成长 ETF 集中 top1 12-1 动量+现金感知避险+BIL 现金等价；实测 +757%/回撤-34%，跑赢 QQQ 收益且回撤≈QQQ、Calmar 更高；本质集中成长押注）。
+
+**现金等价 BIL（防御吃无风险利率）**：三个防御策略"持现金"的地方，top1 全进全出的 dual_momentum /
+aggressive_mom 改持 BIL（1-3月短债 ETF，近零波动零久期，2007+ 全历史 = SGOV 的长历史版）吃短债利率
+（2015-2021 利率≈0 时 BIL≈现金，2022 起 ~5% 每年多赚几个点）。cross_asset_mom（top3）**不接**：其空槽是
+零散 1/3、2/3，等权引擎无法干净建模，且整仓换仓日会把钱集中到不足 3 个的正动量赢家上（+237% 有一部分
+来自这个计划外集中，接 BIL 反把数字降到 +200%）。BIL 数据缺失时所有策略回落到 0% 现金。
 
 ## 关键设计决策（改动前务必理解）
 
