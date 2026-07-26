@@ -266,3 +266,49 @@ def test_market_regime_detects_trend():
     assert market_regime(down)["risk_on"] is False
     # 数据不足返回 None
     assert market_regime(make_df(np.linspace(100, 110, 50)))["risk_on"] is None
+
+
+# ── drawdowns 避险手册 ─────────────────────────────────────────
+def test_find_drawdown_episodes_detects_dip_and_ongoing():
+    from quant.analysis.drawdowns import find_drawdown_episodes
+    # 涨到 120（新高）→ 跌到 96（-20%）→ 收复到 130（新高）→ 再跌到 123（-5%，进行中）
+    up = list(np.linspace(100, 120, 40))
+    down = list(np.linspace(120, 96, 30))
+    recover = list(np.linspace(96, 130, 40))
+    dip2 = list(np.linspace(130, 123, 15))
+    s = pd.Series(up + down + recover + dip2,
+                  index=pd.bdate_range("2020-01-01", periods=125))
+    eps = find_drawdown_episodes(s, threshold=0.08)
+    assert len(eps) == 2
+    closed = [e for e in eps if not e["ongoing"]]
+    ongoing = [e for e in eps if e["ongoing"]]
+    assert len(closed) == 1 and len(ongoing) == 1
+    assert closed[0]["maxdd"] < -0.19               # 约 -20%
+    assert closed[0]["recover_date"] is not None
+    # 进行中的段即便没到阈值也保留（用于实时"对号入座"）
+    assert ongoing[0]["recover_date"] is None
+    assert ongoing[0]["maxdd"] > -0.08
+
+
+def test_classify_episode_flash_vs_deflation_vs_inflation():
+    from quant.analysis.drawdowns import classify_episode
+    fast = {"peak_date": pd.Timestamp("2020-01-01"),
+            "end_date": pd.Timestamp("2020-01-15")}     # 14 天 → 闪崩
+    slow = {"peak_date": pd.Timestamp("2020-01-01"),
+            "end_date": pd.Timestamp("2020-06-01")}     # 慢跌
+    assert classify_episode(fast, 0.10)[0] == "闪崩"
+    assert classify_episode(slow, 0.10)[0] == "通缩/避险型"   # TLT 正
+    assert classify_episode(slow, -0.20)[0] == "通胀/加息型"  # TLT 负
+    assert classify_episode(slow, None)[0] == "通胀/加息型"   # TLT 缺→保守归通胀型
+
+
+def test_episode_returns_total_return_window():
+    from quant.analysis.drawdowns import episode_returns
+    idx = pd.bdate_range("2022-01-03", periods=20)
+    prices = pd.DataFrame({
+        "TLT": np.linspace(100, 90, 20),    # 跌 10%
+        "DBC": np.linspace(100, 120, 20),   # 涨 20%
+    }, index=idx)
+    r = episode_returns(prices, idx[0], idx[-1], ["TLT", "DBC"])
+    assert r["TLT"] < 0 < r["DBC"]
+    assert abs(r["DBC"] - 0.20) < 1e-6

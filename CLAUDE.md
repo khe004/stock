@@ -11,7 +11,7 @@ python run_daily.py --no-fetch --no-notify  # 离线跑流水线（容器内用�
 python run_daily.py --date 2026-07-03     # 补跑某日信号（幂等）
 python run_daily.py --full-refresh        # 全量重拉行情（复权价拼接错位，季度一次）
 python run_daily.py --backfill             # 补全量历史信号入库（标记已通知不推送）
-streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K线/动量排名/市场筛选/策略评分/策略相关性/回测/策略说明）
+streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K线/动量排名/市场筛选/避险手册/策略评分/策略相关性/回测/策略说明）
 ```
 
 ## 架构速览
@@ -27,7 +27,9 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
   scoring.py（signal_forward_returns 逐信号算 5/20/60 日前瞻收益，给策略评分页用）、
   correlation.py（策略相关性/组合诊断：各策略权益曲线转日收益率→Pearson相关矩阵→等权组合分散效果）、
   screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面]+价值半[forward盈利收益率+EV/EBITDA收益率双口径的行业内百分位，抗一次性收益畸变；金融EV/EBITDA失效则只用forward]，当前基本面快照非point-in-time）
-- `quant/web/app.py`：九页面板（市场概览/信号历史/K线/动量排名/市场筛选/策略评分/策略相关性/回测/策略说明）；
+- `quant/web/app.py`：十页面板（市场概览/信号历史/K线/动量排名/市场筛选/避险手册/策略评分/策略相关性/回测/策略说明）；
+  避险手册页（`analysis/drawdowns.py`）：SPY 识别历史下跌段→每段测各避险资产总回报→崩盘类型自动判定
+  （闪崩/通缩型-TLT有效/通胀型-TLT失效需商品黄金），含当前进行中回撤的实时"对号入座"；
   回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式
 
 十个策略：sma_cross、momentum（行业 12-1 月度动量轮动）、rsi_reversal、smart_dca（定投+死叉暂停金叉补投）、

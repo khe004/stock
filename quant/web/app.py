@@ -1647,12 +1647,127 @@ def render_market_screen():
         _render_strength_table(ranked.tail(n).iloc[::-1])
 
 
+def render_drawdown_playbook():
+    from collections import Counter
+
+    from quant.analysis.drawdowns import (
+        HEDGE_CANDIDATES,
+        classify_episode,
+        episode_returns,
+        find_drawdown_episodes,
+        severity,
+    )
+
+    st.subheader("🛡️ 崩盘类型 → 最佳避险")
+    st.caption("以基准总回报识别历史下跌段，测每段【下跌期间】各避险资产的总回报——看清"
+               "没有万能避险：通缩型崩盘靠长债 TLT，通胀型崩盘 TLT 反崩要靠商品/黄金，闪崩靠现金。"
+               "口径：adj_close 总回报，峰→谷（进行中的段用峰→最新）；BIL 短债≈持现金基线。")
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        bench_sym = st.selectbox("基准", ["SPY", "QQQ"], index=0)
+    with c2:
+        thr = st.slider("下跌段阈值（SPY 最大回撤 ≥）", 5, 25, 8, step=1,
+                        format="%d%%", key="dd_thr") / 100
+
+    syms = [bench_sym] + [s for s in HEDGE_CANDIDATES if s != bench_sym]
+    frames = {}
+    for s in syms:
+        df = store.load_prices(conn, s)
+        if not df.empty:
+            frames[s] = price_series(df)
+    px = pd.DataFrame(frames).sort_index()
+    if bench_sym not in px.columns:
+        st.warning(f"{bench_sym} 行情缺失，无法分析")
+        return
+    bench = px[bench_sym].dropna()
+    cands = [s for s in HEDGE_CANDIDATES if s in px.columns]
+    episodes = find_drawdown_episodes(bench, threshold=thr)
+    st.caption(f"数据区间 {bench.index[0]:%Y-%m-%d} ~ {bench.index[-1]:%Y-%m-%d}")
+
+    # ── 当前进行中的回撤（对号入座）──
+    ongoing = [e for e in episodes if e["ongoing"]]
+    if ongoing:
+        e = ongoing[0]
+        rets = episode_returns(px, e["peak_date"], e["end_date"], cands)
+        typ, note = classify_episode(e, rets.get("TLT"))
+        days = (e["end_date"] - e["peak_date"]).days
+        st.error(f"🔴 **当前进行中的回撤** ｜ 从 {e['peak_date']:%Y-%m-%d} 高点至今 {days} 天，"
+                 f"{bench_sym} {e['maxdd']:+.1%}（{severity(e['maxdd'])}）")
+        if rets:
+            best = max(rets, key=rets.get)
+            ranked = sorted(rets.items(), key=lambda x: -x[1])[:4]
+            for col, (sym, r) in zip(st.columns(len(ranked)), ranked):
+                col.metric(etf_label(sym), f"{r:+.1%}", "最抗跌" if sym == best else None)
+            st.info(f"**自动判定：{typ}** —— {note}。当前最抗跌：**{etf_label(best)} {rets[best]:+.1%}**。")
+    else:
+        st.success(f"✅ {bench_sym} 目前在历史新高附近，无进行中回撤。")
+
+    # ── 历史下跌段 × 避险资产矩阵 ──
+    closed = [e for e in episodes if not e["ongoing"]]
+    if not closed:
+        st.info("当前阈值下没有已结束的下跌段，调低阈值试试。")
+        return
+    st.markdown(f"**历史下跌段 × 避险资产**（下跌期间总回报，共 {len(closed)} 段 · 绿底=当次最佳）")
+
+    wins: Counter = Counter()
+    rows = []
+    for e in closed:
+        rets = episode_returns(px, e["peak_date"], e["end_date"], cands)
+        typ, _ = classify_episode(e, rets.get("TLT"))
+        best = max(rets, key=rets.get) if rets else None
+        if best:
+            wins[best] += 1
+        row = {
+            "时段": f"{e['peak_date']:%Y-%m}→{e['trough_date']:%m-%d}",
+            "天数": (e["trough_date"] - e["peak_date"]).days,
+            "严重度": severity(e["maxdd"]),
+            f"{bench_sym}回撤": e["maxdd"],
+            "类型": typ,
+        }
+        for s in cands:
+            row[etf_label(s)] = rets.get(s)
+        row["最佳避险"] = f"{etf_label(best)} {rets[best]:+.1%}" if best else "—"
+        rows.append(row)
+    table = pd.DataFrame(rows)
+    hedge_cols = [etf_label(s) for s in cands]
+    pct_cols = [f"{bench_sym}回撤"] + hedge_cols
+
+    def hi_best(r):
+        styles = [""] * len(r)
+        vals = {c: r[c] for c in hedge_cols if pd.notna(r[c])}
+        if vals:
+            bestc = max(vals, key=vals.get)
+            styles[list(r.index).index(bestc)] = "font-weight:700; background-color: rgba(46,125,50,0.22)"
+        return styles
+
+    styler = (table.style
+              .apply(hi_best, axis=1)
+              .map(signed_color, subset=hedge_cols)
+              .format({c: "{:+.1%}" for c in pct_cols}, na_rep="—"))
+    st.dataframe(styler, width="stretch", hide_index=True)
+
+    win_str = "、".join(f"{etf_label(s)} {c}次" for s, c in wins.most_common())
+    st.markdown(f"**各资产夺冠次数**：{win_str}")
+    st.markdown("""
+**对号入座定律（没有万能避险）**
+- 🟦 **通缩/避险型**（2015、2020 COVID 型）→ **TLT 长债封神**（+14% 级）：利率下行、资金抢国债。
+- 🟥 **通胀/加息型**（2022 型）→ **TLT 是灾难**（2022 −29%，比股市还惨）→ 换 **商品 DBC / 黄金 GLD**。
+- ⚡ **闪崩**（10–20 天）→ 谁都来不及走趋势，**现金/短债 BIL 靠不跌取胜**。
+- 🟡 **黄金 GLD** 是全天候：赢面最广、从不致命；**TLT** 是双峰高 β 对冲（通缩最猛、通胀最毒）。
+
+这正是防御策略「现金感知」的实证依据——不押单一避险，而是让 dual_momentum / aggressive_mom
+按崩盘类型自动躲开错误的避险腿（TLT 动量转负就退到 BIL 吃短债利率）。
+""")
+
+
 PAGES = {
     "📊 市场概览": render_market_overview,
     "📡 信号历史": render_signal_history,
     "🕯️ K线与信号": render_kline,
     "🏆 动量排名": render_momentum_rank,
     "🔍 市场筛选": render_market_screen,
+    "🛡️ 避险手册": render_drawdown_playbook,
     "🎯 策略评分": render_strategy_scoring,
     "🔗 策略相关性": render_correlation,
     "🧪 回测": render_backtest,
