@@ -14,6 +14,10 @@
   forward 与 EV/EBITDA 都不吃这个亏。用 forward 还能修成长股畸高的 trailing（AMD 164→37）。
   两口径全缺（负盈利+无EBITDA）的标的价值分缺失，综合分退回只用动量分（不倒扣）。
   注意 forward 依赖分析师估计、可能偏乐观/被修正——是"预期便宜"不等于"真便宜"。
+  REIT（sectors 标记为"房地产"）单独处理：折旧压低 GAAP 利润让 PE 结构性失真
+  （如 ARE forward PE 曾为 -57），PE 腿对该行业整段剔除，价值分改由 EV/EBITDA
+  单独给出（该口径定义上排除折旧摊销，天然干净——不是真正的 Price/FFO，但效果
+  等价且不需要额外拉现金流量表）。
 
 动量与价值理念相反（动量买贵的赢家、价值买便宜的），50/50 融合是刻意的多因子折中；
 各维仍用百分位等权、不做权重优化（避免落入 stock_momentum 那类过拟合陷阱）。
@@ -36,6 +40,15 @@ from quant.strategies.base import price_series
 
 STRENGTH_DIMS = ("mom", "pos_52w", "dist_ma")
 
+# REIT 折旧压低 GAAP 净利润（房产计提折旧但不是真金白银流出），trailing/forward PE
+# 对 REIT 结构性失真（如 ARE forward PE 曾为 -57、DOC 为 -150）。行业标准做法是改用
+# Price/FFO（FFO=运营资金，加回折旧），但 yfinance 的 ticker.info 不提供 FFO 字段
+# （需另拉现金流量表、逐司解析科目名，工程量大且脆弱）。折衷：EV/EBITDA 定义本就
+# 排除折旧摊销（D&A 在 EBITDA 的 D、A 里被加回），对 REIT 天然干净——所以对这个行业
+# 直接剔除 PE 腿，只用 EV/EBITDA 腿定价值分，跟金融股 EV/EBITDA 失效时自动只用 PE
+# 腿是同一套"某口径对该行业结构性失效就整段剔除"的逻辑，方向相反。
+REIT_SECTORS = ("房地产",)
+
 
 def compute_strength(
     prices: dict[str, pd.DataFrame],
@@ -48,6 +61,7 @@ def compute_strength(
     skip: int = 21,
     ma: int = 200,
     range_window: int = 252,
+    reit_sectors: tuple[str, ...] = REIT_SECTORS,
 ) -> pd.DataFrame:
     """为每个标的算强弱快照（截至各自最新一日）。
 
@@ -58,6 +72,8 @@ def compute_strength(
         sectors: 可选，symbol -> 行业。提供时价值分做【行业内中性化】——盈利收益率
             在同行业内排百分位，消除科技高PE/银行低PE的结构性偏差（否则"价值"沦为
             "做多低PE行业"的行业押注）。不提供则价值分为全市场横截面百分位。
+        reit_sectors: sectors 里标记为 REIT 的行业名，这些标的的 PE 腿整段剔除
+            （折旧结构性失真），价值分改由 EV/EBITDA 腿单独给出（该口径本就排除折旧）。
 
     返回 DataFrame（索引=symbol，按综合分降序），列：
     mom（12-1动量）、pos_52w（52周位置 0~1）、dist_ma（距均线偏离）、above_ma、
@@ -110,6 +126,10 @@ def compute_strength(
     pe = _col(pe_field)
     if pe_fallback:
         pe = pe.where(pe > 0, _col(pe_fallback))  # forward 非正/缺失 → 回退 trailing
+    if sec is not None and reit_sectors:
+        # REIT 折旧压低 GAAP 利润，PE（含 trailing 回退）结构性失真 → 整段剔除，
+        # 价值分改由 EV/EBITDA 腿单独给出（定义上已排除折旧摊销）
+        pe = pe.where(~sec.isin(reit_sectors))
     if pe.where(pe > 0).notna().any():
         df["pe"] = pe
         df["earn_yield"] = 1.0 / pe.where(pe > 0)

@@ -258,6 +258,36 @@ def test_compute_strength_no_pe_falls_back_to_momentum():
     assert df.loc["STRONG", "composite"] == pytest.approx(df.loc["STRONG", "trend_score"])
 
 
+def test_compute_strength_reit_pe_leg_excluded():
+    """REIT（房地产）PE 腿整段剔除：即便给了 PE，也不进 earn_yield/value_score，
+    只靠 EV/EBITDA 定价值——折旧压低 GAAP 利润让 PE 结构性失真（如 ARE 曾为负PE）。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["REIT_A", "REIT_B", "TECH_A"]}
+    fund = pd.DataFrame(
+        # REIT_A 的 PE 看着比 REIT_B 便宜很多（8 vs 40），但 EV/EBITDA 反过来（贵）
+        {"trailing_pe": [8.0, 40.0, 15.0], "ev_to_ebitda": [30.0, 10.0, 12.0]},
+        index=["REIT_A", "REIT_B", "TECH_A"],
+    )
+    sectors = {"REIT_A": "房地产", "REIT_B": "房地产", "TECH_A": "科技"}
+    df = compute_strength(px, fundamentals=fund, sectors=sectors)
+    # REIT 的 pe/earn_yield 被整段剔除（NaN），非 REIT 的科技股不受影响
+    assert pd.isna(df.loc["REIT_A", "pe"]) and pd.isna(df.loc["REIT_A", "earn_yield"])
+    assert pd.isna(df.loc["REIT_B", "pe"]) and pd.isna(df.loc["REIT_B", "earn_yield"])
+    assert df.loc["TECH_A", "pe"] == pytest.approx(15.0)
+    # value_score 完全由 EV/EBITDA 决定：REIT_B（EV/EBITDA 10，更便宜）应高于 REIT_A（30）
+    # 若 PE 腿没被剔除，PE 更"便宜"的 REIT_A 会拉高其价值分，结论会反过来
+    assert df.loc["REIT_B", "value_score"] > df.loc["REIT_A", "value_score"]
+
+
+def test_compute_strength_reit_pe_kept_when_no_sectors():
+    """未提供 sectors 时无法识别 REIT，PE 腿正常参与（不误伤，只是没有行业信息可用）。"""
+    n = 300
+    px = {s: make_df(np.linspace(100, 130, n)) for s in ["A", "B"]}
+    fund = pd.DataFrame({"trailing_pe": [8.0, 40.0]}, index=["A", "B"])
+    df = compute_strength(px, fundamentals=fund)  # 不传 sectors
+    assert df.loc["A", "pe"] == pytest.approx(8.0)
+
+
 def test_market_regime_detects_trend():
     up = make_df(np.linspace(100, 200, 300))
     down = make_df(np.linspace(200, 100, 300))
