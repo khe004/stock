@@ -184,7 +184,9 @@ strategies:
                               # 诚实：集中成长押注，成长失宠会落后，比 cross_asset_mom 波动大
   canary_mom:                 # 哨兵动量：把「何时防守」与「持什么」拆开（Keller DAA/HAA 架构）
     enabled: true
-    notify: false             # 仅观察：新策略，先攒实盘信号再考虑推送（理由见 canary.py 诚实边界）
+    notify: true              # 2026-07-28 起推送：它已进入推荐模型组合（见文件末 model_portfolio），
+                              # 推荐一个策略却不推它的信号是自相矛盾的。注意本平台只发信号不下单，
+                              # 且它至今**没有样本外记录**——收到信号≠该照做，诚实边界见 canary.py
     lookback_days: 252        # 选择层（慢）：12-1 动量，与平台其它策略一致
     skip_days: 21
     top_n: 3                  # 与 cross_asset_mom 同宇宙同 top_n，便于 A/B
@@ -199,6 +201,23 @@ strategies:
                               # = 平台上第一个两段都跑赢自己公平基准的策略。timing luck 跨度 194bp（中等）
                               # A/B：叠加自指绝对动量（HAA 原版双保险）反而变差（超额-0.8%/夏普-0.08）；
                               # 现有 cross_asset_mom 的自指开关两段超额均为负（-1.8%/-1.8%）
+
+# 推荐模型组合（相关性页「🧺 模型组合」的默认成分）
+# 定位见 CLAUDE.md 决策 #10：策略有时效性、事前分不清谁在当季，所以同时持有几个
+# 决策方式不同、相互低相关的，而不是找那个永远有效的。
+model_portfolio:
+  strategies:
+    - low_vol           # 最大的分散者（与其它策略相关 0.23~0.45）
+    - aggressive_mom    # 增长腿（集中成长押注）
+    - canary_mom        # 防守腿（哨兵架构）—— 2026-07-28 换掉 cross_asset_mom
+    - smart_dca         # 定投腿（节奏完全不同的决策方式）
+  # 【2026-07-28 换人记录】原成分是 cross_asset_mom，换成 canary_mom 的理由：
+  # 两者相关 0.76（共享同一进攻宇宙）= 替代关系而非互补；换后全历史夏普 0.96→1.01、
+  # Calmar 0.60→0.67、回撤 -20.6%→-18.0%、收益基本持平，且换后**两个半段的夏普都是
+  # 全场第一**（原配方在 2015-2020 输给 QQQ 长持）。cross_asset_mom 自身对公平基准
+  # 两段超额均为负（见其文档头的撤回说明），canary_mom 两段都赢三项。
+  # 诚实：成分沿用月首日调仓故仍带 timing luck；配方是拿全历史挑的，属轻度 in-sample；
+  # canary_mom 至今没有样本外记录。别按这个配方下重注。
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

@@ -429,3 +429,19 @@ def test_timing_luck_sweep_reports_spread_and_tranche():
     cagrs = [r["cagr"] for r in out["per_offset"]]
     assert min(cagrs) - 1e-9 <= out["tranched"]["cagr"] <= max(cagrs) + 1e-9
     assert out["current_is_best"] == (cagrs[0] == max(cagrs))
+
+
+def test_config_model_portfolio_is_explicit_and_consistent():
+    """推荐配方必须显式配在 config，且成分都是启用中的策略。"""
+    from quant.config import load_config
+    cfg = load_config()
+    mp = cfg.model_portfolio
+    assert mp, "config 应显式配置 model_portfolio.strategies"
+    enabled = {name for name, _ in cfg.enabled_strategies()}
+    assert set(mp) <= enabled, f"推荐配方含未启用策略：{set(mp) - enabled}"
+    assert len(set(mp)) == len(mp), "推荐配方有重复成分"
+    assert len(mp) >= 2, "组合至少要 2 个成分才谈得上分散"
+    # 推荐的成分必须会推送信号——推荐一个策略却不推它的信号是自相矛盾的
+    params = dict(cfg.enabled_strategies())
+    silent = [s for s in mp if not params[s].get("notify", True)]
+    assert not silent, f"推荐配方成分未开启推送：{silent}"

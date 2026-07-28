@@ -754,11 +754,13 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
     )
 
     enabled = dict(cfg.enabled_strategies())
-    # 默认成分 = 会推送的实盘候选；notify:false 的仅观察策略与已定性"不作实盘仓位"的
-    # stock_momentum 排除在外（见 CLAUDE.md 当前状态）
+    # 默认成分 = config 里显式配置的推荐配方（model_portfolio.strategies）；
+    # 没配或成分不在当前收益序列里时，回落到"会推送的实盘候选"
+    # （notify:false 的仅观察策略与已定性"不作实盘仓位"的 stock_momentum 除外）
     live = [c for c in aligned.columns
             if enabled.get(c, {}).get("notify", True) and c != "stock_momentum"]
-    default = live or list(aligned.columns)
+    recommended = [c for c in cfg.model_portfolio if c in aligned.columns]
+    default = recommended or live or list(aligned.columns)
     if "mp_pick" not in st.session_state:
         st.session_state["mp_pick"] = default
 
@@ -768,9 +770,10 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
         if st.button("推荐低相关组合", key="mp_suggest"):
             # 只从实盘候选里挑——推荐里混进 vix_regime 这类仅观察策略是误导
             st.session_state["mp_pick"] = suggest_low_corr_set(corr, int(n_sug), default)
+    label = ("组合成分（默认=config 的 model_portfolio 推荐配方）" if recommended
+             else "组合成分（默认=会推送的实盘候选，已排除仅观察策略）")
     with c1:
-        picked = st.multiselect("组合成分（默认=会推送的实盘候选，已排除仅观察策略）",
-                                options=list(aligned.columns), key="mp_pick")
+        picked = st.multiselect(label, options=list(aligned.columns), key="mp_pick")
     if len(picked) < 2:
         st.info("至少选 2 个策略才能构成组合。")
         return
@@ -1817,7 +1820,9 @@ SSRN 公开论文 + Allocate Smartly 第三方复现。**这一点很重要**—
 - 绝对收益仍**大幅跑输 SPY 长持**（+208% vs +335%）——分散到非美/债/商品在这段美股独大的
   历史里必然拖累绝对收益。
 
-→ 因此配置为 **`notify: false` 仅观察**：先攒实盘信号、看样本外表现，再考虑推送。
+→ **2026-07-28 起 `notify: true`**：它已进入 config 的推荐模型组合（换掉了 `cross_asset_mom`——
+两者相关 0.76 属替代关系，换后组合夏普 0.96→1.01、回撤 -20.6%→-18.0%，且两个半段的夏普
+都是全场第一）。但本平台只发信号不下单，而它**至今没有任何样本外记录**——收到信号 ≠ 该照做。
 
 **作用范围**：跨资产进攻池 + 哨兵 TIP + 防守腿 IEF/BIL
 （`cross_asset_mom_universe` + `canary` + `defense` + `cash` 组）。

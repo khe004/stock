@@ -60,6 +60,15 @@ class Config:
     def cost_bps(self) -> float:
         return float(self.raw.get("backtest", {}).get("cost_bps", 0))
 
+    @property
+    def model_portfolio(self) -> list[str]:
+        """推荐模型组合的成分策略（相关性页「🧺 模型组合」的默认勾选）。
+
+        显式写进 config 而不是藏在面板代码里——这是一个有实测依据、会随结论变的决定，
+        应该像策略参数一样被版本化、可追溯。空/缺省时面板回落到"全部会推送的策略"。
+        """
+        return list(self.raw.get("model_portfolio", {}).get("strategies", []))
+
     def universe_symbols(self, filename: str) -> list[str]:
         """读取按行业分组的候选超集文件，返回全部代码（去重保序）。"""
         if filename not in self._universe_cache:
