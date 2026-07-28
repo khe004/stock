@@ -116,6 +116,16 @@ aggressive_mom 改持 BIL（1-3月短债 ETF，近零波动零久期，2007+ 全
     不是 alpha**；(c) 成分沿用月首日调仓，继承了 dual_momentum / cross_asset_mom 的 timing luck，
     且低相关成分是拿全历史相关矩阵挑的（轻度 in-sample）。
     别因为某成分近期跑输就换掉它——按近期表现换策略本身就是过拟合。
+    **canary_mom 加入后的复测（2026-07-28）**：它与 cross_asset_mom 相关 **0.76**（共享宇宙），
+    所以是**替代**而非补位。三个值得记的配方（成分沿用月首日口径，仍带 timing luck）：
+    - **canary 换掉 cross_asset**（low_vol/aggressive/canary/smart_dca）：夏普 1.01、Calmar 0.67、
+      回撤 -18.0%，**且两个半段的夏普都是全场第一**（原 4 件套在 2015-2020 输给 QQQ）→ 严格优于原配方。
+    - **canary + aggressive + low_vol**（平均相关 0.38，最低）：夏普 **1.03**、Calmar 0.73、
+      回撤 -18.2%、+322% —— 全历史夏普最高的配方。
+    - **canary + aggressive 双腿杠铃**：**+454% / 年化 16.0% / 回撤 -21.2% / 夏普 0.95 / Calmar 0.75**，
+      **在每一项指标上都优于 SPY 长持**（+336%/13.6%/-33.7%/0.81/0.40）——这是平台上第一个做到
+      "收益和回撤同时赢 SPY"的东西，正对[[stock-eval-benchmarks]]要的"风险可控的增长"。
+      代价：只有 2 个成分 = specification risk 最高，且 aggressive_mom 自身的超额是 regime 依赖的。
 
 ## 容器环境（Claude Code 云端）注意
 

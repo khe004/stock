@@ -744,7 +744,13 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
         "单跑一个策略等于押注「这一套设定恰好对」（specification risk），而策略是有时效性的、"
         "事前又分不清哪个在当季——Allocate Smartly 跟踪 90+ 个 TAA 策略，其用户组合 78% 含多个策略、"
         "平均 3.8 个。挑选标准是**决策方式不同 + 相互低相关**，买的是「过程分散」而非只有「资产分散」。\n\n"
-        "📅 本节沿用页面顶部的**回测区间**选择（默认近 3 年）——想看全历史请切到「全部」。"
+        "📅 本节沿用页面顶部的**回测区间**选择（默认近 3 年）——想看全历史请切到「全部」。\n\n"
+        "💡 **几个实测过的配方**（全历史口径，2026-07-28）：`canary_mom` 与 `cross_asset_mom` "
+        "相关 0.76（共享宇宙），所以是**替代**不是补位。把 cross_asset 换成 canary 后夏普 0.96→1.01、"
+        "回撤 -20.6%→-18.0%，且**两个半段的夏普都是全场第一**；`canary+aggressive+low_vol` 三件套"
+        "相关最低(0.38)、夏普最高(1.03)；`canary+aggressive` 双腿杠铃 +454%/回撤-21.2%/Calmar0.75，"
+        "**每一项都优于 SPY 长持**，但只有 2 个成分 = specification risk 最高。"
+        "注意 canary_mom 目前是 notify:false 仅观察，尚无样本外记录。"
     )
 
     enabled = dict(cfg.enabled_strategies())
