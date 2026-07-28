@@ -1,5 +1,6 @@
 from quant.strategies.aggressive import AggressiveMomentum
 from quant.strategies.base import BUY, SELL, Signal, Strategy
+from quant.strategies.canary import CanaryMomentum
 from quant.strategies.cross_asset import CrossAssetMomentum
 from quant.strategies.dual_momentum import DualMomentum
 from quant.strategies.low_vol import LowVol
@@ -14,7 +15,7 @@ REGISTRY: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (SmaCross, Momentum, RsiReversal, SmartDca, DualMomentum,
                 VixRegime, StockMomentum, LowVol, CrossAssetMomentum,
-                AggressiveMomentum)
+                AggressiveMomentum, CanaryMomentum)
 }
 
 

@@ -37,11 +37,17 @@ DEFAULT_OFFSETS = (0, 5, 10, 15)
 
 
 def defensive_symbols(params: dict) -> set[str]:
-    """策略的避险腿与现金等价——不属于"候选池"，公平基准应把它们排除。"""
+    """策略的避险腿/现金等价/哨兵——都不属于"候选池"，公平基准应把它们排除。
+
+    哨兵（canary_assets）尤其要排除：它只当风险开关、从不持有，
+    把它算进等权基准等于让基准持有一个策略永远不会买的东西。
+    """
     out: set[str] = set()
     if params.get("safe_asset"):
         out.add(params["safe_asset"])
     out.update(params.get("safe_assets") or [])
+    out.update(params.get("canary_assets") or [])
+    out.update(params.get("defense_assets") or [])
     if params.get("cash_asset"):
         out.add(params["cash_asset"])
     return out

@@ -34,6 +34,10 @@ watchlist:
     - IBIT              # 比特币
   cash:                 # 现金等价物（防御策略的"持现金"兜底 → 改持短债吃无风险利率）
     - BIL               # 1-3月短债 ETF（近零波动、零久期；2007+全历史，= SGOV 的长历史版）
+  canary:               # 哨兵资产（Keller DAA/HAA 的 canary universe）：只当风险开关，不持有
+    - TIP               # 抗通胀国债（HAA 用的单哨兵：通胀/实际利率的早期预警）
+  defense:              # 防守腿（哨兵触发时持有，与 cash 组的 BIL 一起选动量最高的）
+    - IEF               # 7-10 年中期国债（久期短于 TLT，2022 型加息熊市里没那么惨）
   # ── 以下三组仅拉数据/展示与未来跨资产用，组名未被任何策略 groups 引用 → 不喂给现有策略 ──
   # （加入前用日收益相关性筛过：只留与现有池低相关=真加信息的，冗余的如 VGT/VNQ/XSD/XOP 已剔）
   cross_asset:          # 跨资产分散（跨资产动量的原料，backlog #6）
@@ -178,6 +182,23 @@ strategies:
                               # 但输夏普，且 walk-forward 分裂：2015-2020 三项都输、超额只在 2021-2026
                               # → "排名加了信息"未被证明，站得住的是集中押注+避险腿。详见 aggressive.py
                               # 诚实：集中成长押注，成长失宠会落后，比 cross_asset_mom 波动大
+  canary_mom:                 # 哨兵动量：把「何时防守」与「持什么」拆开（Keller DAA/HAA 架构）
+    enabled: true
+    notify: false             # 仅观察：新策略，先攒实盘信号再考虑推送（理由见 canary.py 诚实边界）
+    lookback_days: 252        # 选择层（慢）：12-1 动量，与平台其它策略一致
+    skip_days: 21
+    top_n: 3                  # 与 cross_asset_mom 同宇宙同 top_n，便于 A/B
+    canary_assets: [TIP]      # 触发层（快）：13612W 哨兵，任一为负 → 全体风险关闭
+    defense_assets: [IEF, BIL]  # 风险关闭时持动量最高的防守腿
+    cash_asset: BIL
+    abs_momentum: false       # 不叠加自指的绝对动量过滤——实测叠上去反而变差（见下）
+    groups: [cross_asset_mom_universe, canary, defense, cash]
+                              # 实测（错峰口径，全历史）：+208%/年化10.2%/回撤-19.8%/夏普0.97/Calmar0.52
+                              # vs ★进攻池等权 +171%/9.0%/-23.0%/0.81/0.39 → 超额+1.2%/夏普+0.15/回撤好3.3pt
+                              # **walk-forward 两段都赢三项**（超额+1.1%/+0.7%，夏普+0.21/+0.07）
+                              # = 平台上第一个两段都跑赢自己公平基准的策略。timing luck 跨度 194bp（中等）
+                              # A/B：叠加自指绝对动量（HAA 原版双保险）反而变差（超额-0.8%/夏普-0.08）；
+                              # 现有 cross_asset_mom 的自指开关两段超额均为负（-1.8%/-1.8%）
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

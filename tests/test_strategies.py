@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant import strategies
 from quant.strategies.base import BUY, SELL
 from quant.strategies.momentum import Momentum
 from quant.strategies.rsi_reversal import RsiReversal
@@ -722,3 +723,73 @@ def test_aggressive_mom_reason_and_strength():
     for s in buys:
         assert "动量" in s.reason and "%" in s.reason
         assert 0 < s.strength <= 1.0
+
+
+# ── canary_mom 哨兵动量 ─────────────────────────────────
+
+def _canary_prices(canary_trend: float, n: int = 700):
+    """构造：进攻资产明显上涨、防守腿平稳、哨兵按给定斜率走。"""
+    import numpy as np
+    idx = pd.bdate_range("2022-01-03", periods=n)
+    out = {}
+    for i, sym in enumerate(["SPY", "QQQ", "GLD", "TLT"]):
+        out[sym] = _df(np.linspace(100, 100 + 60 + 10 * i, n), idx)
+    out["IEF"] = _df(np.linspace(100, 108, n), idx)
+    out["BIL"] = _df(np.linspace(100, 104, n), idx)
+    out["TIP"] = _df(np.linspace(100, 100 + canary_trend, n), idx)
+    return out
+
+
+def _df(closes, idx):
+    import numpy as np
+    closes = np.asarray(closes, dtype=float)
+    return pd.DataFrame({"open": closes, "high": closes, "low": closes,
+                         "close": closes, "adj_close": closes, "volume": 1000},
+                        index=idx)
+
+
+def test_canary_positive_holds_offense_negative_goes_defensive():
+    params = dict(top_n=2, canary_assets=["TIP"], defense_assets=["IEF", "BIL"],
+                  cash_asset="BIL", abs_momentum=False)
+    up = strategies.build("canary_mom", {**params}).generate(_canary_prices(+40))
+    down = strategies.build("canary_mom", {**params}).generate(_canary_prices(-40))
+    assert up and down
+    # 哨兵上行 → 只买进攻腿，绝不碰防守腿
+    up_bought = {s.symbol for s in up if s.direction == BUY}
+    assert up_bought and not (up_bought & {"IEF", "BIL"})
+    assert "TIP" not in {s.symbol for s in up}          # 哨兵只当开关，从不持有
+    # 哨兵下行 → 全部进防守腿
+    down_bought = {s.symbol for s in down if s.direction == BUY}
+    assert down_bought <= {"IEF", "BIL"}
+    assert any("哨兵" in s.reason for s in down)
+
+
+def test_canary_never_trades_the_canary_asset():
+    params = dict(top_n=2, canary_assets=["TIP"], defense_assets=["IEF", "BIL"])
+    for trend in (+40, -40, 0):
+        sigs = strategies.build("canary_mom", params).generate(_canary_prices(trend))
+        assert "TIP" not in {s.symbol for s in sigs}
+
+
+def test_momentum_13612w_is_faster_than_12_1():
+    """13612W 因为把近月年化加权，对最近一个月的反转反应远快于 12-1。"""
+    import numpy as np
+    from quant.strategies.canary import momentum_13612w
+    idx = pd.bdate_range("2022-01-03", periods=300)
+    # 前 279 日缓涨，最后 21 日急跌
+    path = np.concatenate([np.linspace(100, 140, 279), np.linspace(140, 105, 21)])
+    adj = pd.DataFrame({"X": path}, index=idx)
+    fast = momentum_13612w(adj)["X"].iloc[-1]
+    slow = (adj["X"].shift(21) / adj["X"].shift(252) - 1).iloc[-1]
+    assert slow > 0        # 12-1 跳过最近一月 → 仍看到上涨
+    assert fast < 0        # 13612W 已经转负
+    assert fast < slow
+
+
+def test_canary_missing_canary_or_defense_returns_no_signals():
+    prices = _canary_prices(+40)
+    no_canary = {k: v for k, v in prices.items() if k != "TIP"}
+    no_defense = {k: v for k, v in prices.items() if k not in ("IEF", "BIL")}
+    p = dict(top_n=2, canary_assets=["TIP"], defense_assets=["IEF", "BIL"])
+    assert strategies.build("canary_mom", p).generate(no_canary) == []
+    assert strategies.build("canary_mom", p).generate(no_defense) == []
