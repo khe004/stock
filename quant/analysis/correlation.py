@@ -171,6 +171,46 @@ def correlation_matrix(returns_df: pd.DataFrame) -> pd.DataFrame:
     return aligned.corr()
 
 
+def suggest_low_corr_set(corr: pd.DataFrame, n: int = 4,
+                         candidates: list[str] | None = None) -> list[str]:
+    """贪心挑出 n 个彼此相关性最低的策略，作为模型组合（Model Portfolio）的起点。
+
+    为什么要挑而不是全上：单跑一个策略等于把身家押在"这一套设定恰好对"上
+    （specification risk）。策略是有时效性的、而且事前分不清哪个在当季，所以行业
+    （Allocate Smartly 跟踪 90+ 个 TAA 策略）给的答案是**同时持有几个决策方式不同、
+    相互低相关的策略**——他们用户的组合里 78% 含多个策略，平均 3.8 个。
+
+    贪心口径：先取相关性最低的一对，之后每步加入"与已选集合平均相关最低"的那个。
+    这只是个起点建议，不是最优化——低相关是必要条件不是充分条件，还要看策略本身
+    站不站得住（见 analysis/robustness.py）。
+    """
+    pool = [c for c in (candidates or list(corr.columns)) if c in corr.columns]
+    if len(pool) <= n:
+        return pool
+    sub = corr.loc[pool, pool]
+    best_pair, best_val = None, None
+    for i, a in enumerate(pool):
+        for b in pool[i + 1:]:
+            v = float(sub.at[a, b])
+            if best_val is None or v < best_val:
+                best_pair, best_val = [a, b], v
+    picked = list(best_pair)
+    while len(picked) < n:
+        rest = [c for c in pool if c not in picked]
+        nxt = min(rest, key=lambda c: sum(float(sub.at[c, p]) for p in picked) / len(picked))
+        picked.append(nxt)
+    return picked
+
+
+def average_pairwise_corr(corr: pd.DataFrame, names: list[str]) -> float:
+    """一组策略的平均两两相关系数（自相关不计）。"""
+    names = [n for n in names if n in corr.columns]
+    if len(names) < 2:
+        return float("nan")
+    vals = [float(corr.at[a, b]) for i, a in enumerate(names) for b in names[i + 1:]]
+    return sum(vals) / len(vals)
+
+
 def combined_portfolio(
     returns_df: pd.DataFrame,
     initial_value: float = 10_000.0,

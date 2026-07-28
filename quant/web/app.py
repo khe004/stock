@@ -13,12 +13,15 @@ from plotly.subplots import make_subplots
 
 from quant import strategies
 from quant.analysis.correlation import (
+    average_pairwise_corr,
     combined_portfolio,
     correlation_matrix,
     strategy_return_series,
+    suggest_low_corr_set,
 )
 from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
-from quant.analysis.robustness import equal_weight_equity, robustness_report
+from quant.analysis.robustness import (equal_weight_equity, robustness_report,
+                                      split_windows)
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.analysis.screening import compute_strength, market_regime
 from quant.backtest.engine import (
@@ -722,6 +725,135 @@ def render_correlation():
             )
         else:
             st.warning("等权组合波动率反而高于单策略平均——可能是策略数太少或正好同涨同跌。")
+
+    _render_model_portfolio(aligned, corr)
+
+
+def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
+    """模型组合（Model Portfolio）：自选几个低相关策略等权，对比单策略与长持基准。
+
+    定位见 analysis/correlation.py 的 suggest_low_corr_set 文档：这是对
+    specification risk 与"策略有时效性"的实操回答——不是找那个永远有效的策略，
+    而是同时持有几个决策方式不同、相互低相关的。
+    """
+    st.subheader("🧺 模型组合（Model Portfolio）")
+    st.caption(
+        "上面那张「等权组合」把**所有**启用策略都算了进去，包含 sma_cross / rsi_reversal / "
+        "vix_regime / stock_momentum 这些**仅观察不建仓**的——那是分散度诊断，不是可执行组合。\n\n"
+        "这里自己挑几个真会持有的策略等权组合。**为什么要组合而不是选一个最好的**："
+        "单跑一个策略等于押注「这一套设定恰好对」（specification risk），而策略是有时效性的、"
+        "事前又分不清哪个在当季——Allocate Smartly 跟踪 90+ 个 TAA 策略，其用户组合 78% 含多个策略、"
+        "平均 3.8 个。挑选标准是**决策方式不同 + 相互低相关**，买的是「过程分散」而非只有「资产分散」。\n\n"
+        "📅 本节沿用页面顶部的**回测区间**选择（默认近 3 年）——想看全历史请切到「全部」。"
+    )
+
+    enabled = dict(cfg.enabled_strategies())
+    # 默认成分 = 会推送的实盘候选；notify:false 的仅观察策略与已定性"不作实盘仓位"的
+    # stock_momentum 排除在外（见 CLAUDE.md 当前状态）
+    live = [c for c in aligned.columns
+            if enabled.get(c, {}).get("notify", True) and c != "stock_momentum"]
+    default = live or list(aligned.columns)
+    if "mp_pick" not in st.session_state:
+        st.session_state["mp_pick"] = default
+
+    c1, c2 = st.columns([3, 1])
+    with c2:
+        n_sug = st.number_input("推荐个数", 2, max(2, len(aligned.columns)), 4, key="mp_n")
+        if st.button("推荐低相关组合", key="mp_suggest"):
+            # 只从实盘候选里挑——推荐里混进 vix_regime 这类仅观察策略是误导
+            st.session_state["mp_pick"] = suggest_low_corr_set(corr, int(n_sug), default)
+    with c1:
+        picked = st.multiselect("组合成分（默认=会推送的实盘候选，已排除仅观察策略）",
+                                options=list(aligned.columns), key="mp_pick")
+    if len(picked) < 2:
+        st.info("至少选 2 个策略才能构成组合。")
+        return
+
+    sub = aligned[picked]
+    combo_eq, combo_m = combined_portfolio(sub)
+    if combo_eq.empty:
+        st.warning("无法构建组合")
+        return
+
+    rows: dict[str, dict] = {"🧺 模型组合": combo_m}
+    for c in picked:
+        rows[c] = equity_metrics(INITIAL_CASH * (1 + sub[c]).cumprod(), INITIAL_CASH)
+    for b in ("SPY", "QQQ"):
+        bdf = store.load_prices(conn, b)
+        if bdf.empty:
+            continue
+        bret = price_series(bdf).pct_change(fill_method=None).reindex(sub.index).fillna(0.0)
+        rows[f"{b} 长持"] = equity_metrics(INITIAL_CASH * (1 + bret).cumprod(), INITIAL_CASH)
+
+    table = pd.DataFrame(rows).T.rename(columns=RISK_COLS)
+
+    def _combo_style(row):
+        return (["background-color: rgba(33, 150, 243, 0.15); font-weight: bold"] * len(row)
+                if row.name == "🧺 模型组合" else [""] * len(row))
+
+    st.dataframe(
+        table.style.apply(_combo_style, axis=1).format(
+            {"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
+             "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}),
+        width="stretch")
+
+    avg_c = average_pairwise_corr(corr, picked)
+    worst_dd = min(rows[c]["max_drawdown"] for c in picked)     # 回撤是负数，min = 最深
+    st.caption(
+        f"成分平均两两相关 **{avg_c:.2f}**（越低越好；>0.5 说明成分在做同一件事，组合是假分散）。"
+        f"组合回撤 {combo_m['max_drawdown']:.1%}，最差成分回撤 {worst_dd:.1%}——"
+        "**组合的价值主要在这里：把「最差那个」的痛苦削掉，而不是把最好那个的收益抬上去。**\n\n"
+        "⚠️ 两条诚实提醒：\n"
+        "1. **组合夏普高于每个成分，很大一部分是分散的数学结果，不是 alpha。** "
+        "把不完全相关的序列平均，波动降得比收益快，夏普自然上去——这是真实可得的好处，"
+        "但别把它读成「我们找到了更好的策略」。\n"
+        "2. **成分沿用各自默认的月首日调仓**，而 dual_momentum / cross_asset_mom 的月首日恰好是"
+        "四个调仓日里最好的那个（见回测页稳健性检验），所以组合数字也继承了这份 timing luck。"
+        "「推荐低相关组合」也是拿全历史相关矩阵挑的，属于轻度 in-sample 选择。"
+    )
+
+    # ── 分段：组合的名次稳不稳 ─────────────────────────
+    st.markdown("**分段检验：组合的名次稳不稳？**")
+    wins = split_windows(sub.index, 2)
+    seg_rows: dict[str, dict] = {}
+    combo_ranks = []
+    for label, s, e in wins:
+        seg = sub.loc[s:e]
+        if len(seg) < 20:
+            continue
+        seg_combo, seg_m = combined_portfolio(seg)
+        if seg_combo.empty:
+            continue
+        seg_rows[f"{label}｜🧺 模型组合"] = seg_m
+        cagrs = {}
+        for c in picked:
+            m = equity_metrics(INITIAL_CASH * (1 + seg[c]).cumprod(), INITIAL_CASH)
+            seg_rows[f"{label}｜{c}"] = m
+            cagrs[c] = m["cagr"]
+        rank = 1 + sum(1 for v in cagrs.values() if v > seg_m["cagr"])
+        combo_ranks.append((label, rank, len(picked) + 1))
+    if seg_rows:
+        st.dataframe(
+            pd.DataFrame(seg_rows).T.rename(columns=RISK_COLS).style.format(
+                {"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
+                 "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}),
+            width="stretch")
+        rank_txt = "、".join(f"{lab} 第 {r}/{n} 名" for lab, r, n in combo_ranks)
+        st.caption(
+            f"组合在各段的收益名次：{rank_txt}。**组合几乎永远不会是收益第一名**——"
+            "它的目标不是当冠军，是**不当垫底**：每段都有策略跑输，但事前你不知道是哪个。\n\n"
+            "读法与回测页的稳健性检验一致：看区间与最坏那一段，不看最大值；"
+            "也不要因为某个成分在某段跑输就把它踢掉——好因子连输很多年是常态"
+            "（价值输了 13 年），事后按近期表现换策略本身就是一种过拟合。"
+        )
+
+    eqfig = go.Figure(go.Scatter(x=combo_eq.index, y=combo_eq, mode="lines",
+                                 name="🧺 模型组合", line=dict(width=3, color="#2196f3")))
+    for c in picked:
+        eqfig.add_trace(go.Scatter(x=sub.index, y=INITIAL_CASH * (1 + sub[c]).cumprod(),
+                                   mode="lines", name=c, line=dict(width=1)))
+    eqfig.update_layout(height=420, title="模型组合 vs 各成分策略权益曲线")
+    st.plotly_chart(eqfig, width="stretch")
 
 
 PORTFOLIO_STRATEGIES = {"momentum", "dual_momentum", "stock_momentum", "low_vol",

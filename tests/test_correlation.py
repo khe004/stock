@@ -237,3 +237,37 @@ def test_combined_portfolio_diversification_effect():
     avg_vol = (vol_a + vol_b) / 2
     # 不相关策略的组合波动应低于单策略平均波动
     assert combo_metrics["volatility"] < avg_vol
+
+
+# ── 模型组合：低相关成分挑选 ──────────────────────────────
+
+def test_suggest_low_corr_set_picks_least_correlated():
+    from quant.analysis.correlation import average_pairwise_corr, suggest_low_corr_set
+    names = ["a", "b", "c", "d"]
+    # a/b 高度相关，c/d 与所有人低相关
+    corr = pd.DataFrame([[1.00, 0.95, 0.10, 0.12],
+                         [0.95, 1.00, 0.15, 0.11],
+                         [0.10, 0.15, 1.00, 0.05],
+                         [0.12, 0.11, 0.05, 1.00]], index=names, columns=names)
+    assert set(suggest_low_corr_set(corr, 2)) == {"c", "d"}      # 最低的一对
+    picked3 = suggest_low_corr_set(corr, 3)
+    assert {"c", "d"} <= set(picked3) and len(picked3) == 3
+    # 少于等于 n 个候选时原样返回
+    assert suggest_low_corr_set(corr, 9) == names
+    assert suggest_low_corr_set(corr, 2, ["a", "b"]) == ["a", "b"]
+    assert abs(average_pairwise_corr(corr, ["c", "d"]) - 0.05) < 1e-9
+    assert average_pairwise_corr(corr, ["a"]) != average_pairwise_corr(corr, ["a"])  # 单个 → NaN
+
+
+def test_combined_portfolio_subset_lowers_volatility():
+    from quant.analysis.correlation import combined_portfolio
+    idx = pd.bdate_range("2022-01-03", periods=400)
+    rng = np.random.default_rng(3)
+    # 两条基本独立的收益序列 → 等权组合波动应低于两者
+    df = pd.DataFrame({"x": rng.normal(0.0005, 0.012, 400),
+                       "y": rng.normal(0.0005, 0.012, 400)}, index=idx)
+    _, m = combined_portfolio(df)
+    singles = [float((10_000 * (1 + df[c]).cumprod()).pct_change().std()) for c in df]
+    combo_vol = float((10_000 * (1 + df.mean(axis=1)).cumprod()).pct_change().std())
+    assert combo_vol < min(singles)
+    assert m["volatility"] > 0
