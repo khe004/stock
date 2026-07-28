@@ -18,6 +18,7 @@ from quant.analysis.correlation import (
     strategy_return_series,
 )
 from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
+from quant.analysis.robustness import equal_weight_equity, robustness_report
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.analysis.screening import compute_strength, market_regime
 from quant.backtest.engine import (
@@ -905,16 +906,84 @@ def pool_equal_weight_equity(prices: dict[str, pd.DataFrame],
     return equity.rename("pool_ew")
 
 
-def equal_weight_equity(prices: dict[str, pd.DataFrame],
-                        initial_cash: float) -> pd.Series | None:
-    """等权基准：宇宙内全部标的每日等权持有（日度再平衡，不计成本）。
-    去掉"事后挑中赢家"的偏差——比起拿 XLK 长持（十五年里恰好封神的板块）当基准，
-    板块等权才是判断"轮动/择时有没有加信息"的公平对照。"""
-    adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
-    if adj.empty:
-        return None
-    daily = adj.pct_change(fill_method=None).mean(axis=1)  # 每日等权（有数据的标的均值）
-    return (initial_cash * (1 + daily.fillna(0.0)).cumprod()).rename("equal_weight")
+def _fmt_metrics_row(m: dict) -> dict:
+    return {"总收益": m["total_return"], "年化": m["cagr"], "最大回撤": m["max_drawdown"],
+            "夏普": m["sharpe"], "Calmar": m["calmar"]}
+
+
+_METRIC_FMT = {"总收益": "{:+.0%}", "年化": "{:+.1%}", "最大回撤": "{:.1%}",
+               "夏普": "{:.2f}", "Calmar": "{:.2f}"}
+
+
+def _render_robustness(strategy_name: str, params: dict,
+                       prices: dict[str, pd.DataFrame]) -> None:
+    """稳健性检验面板：调仓日 timing luck 散布 + 分段 vs 池子等权。
+
+    刻意【不出通过/不通过】，只出期望区间——见 quant/analysis/robustness.py 文档头：
+    11 年月频数据的独立观测只有 2-3 个，不可能回答"有没有 alpha"，只能回答"数字有没有虚高"。
+    """
+    with st.expander("🧭 稳健性检验（调仓日 timing luck + 分段 + 池子等权）", expanded=False):
+        st.caption(
+            "回答的是「我报出来的数字有没有虚高」，**不是**「这个策略有没有 alpha」——"
+            "11 年月频数据按 regime 高度自相关，独立观测只有 2-3 个，没有统计功效去判后者。\n\n"
+            "三个问题：**①调仓日** 这个数字是不是恰好挑中了最好的调仓日（全平台默认锚在"
+            "每月首个交易日，是个从未被检验的隐含选择）；**②分段** 是不是靠单一 regime 撑起来的；"
+            "**③池子等权** 是不是宇宙本身好、而非选择能力。\n\n"
+            "⚠️ 用**全部历史**计算，不受上方区间选择影响；要跑 4 遍策略，需要几秒。"
+        )
+        if len(prices) > 50:
+            st.warning(f"本策略宇宙有 {len(prices)} 只标的，跑 4 遍可能要一分钟以上，请耐心等待。")
+        key = f"robust_{strategy_name}"
+        if st.button("跑稳健性检验", key=f"btn_{key}"):
+            with st.spinner("正在按 4 个调仓日与各分段重跑…"):
+                st.session_state[key] = robustness_report(
+                    strategy_name, params, prices, INITIAL_CASH, cfg.cost_bps)
+        rep = st.session_state.get(key)
+        if rep is None:
+            return
+
+        tl = rep["timing_luck"]
+        st.markdown("**① 调仓日散布（timing luck）**")
+        rows = {r["label"]: _fmt_metrics_row(r) for r in tl["per_offset"]}
+        rows["4-tranche 错峰组合"] = _fmt_metrics_row(tl["tranched"])
+        df_tl = pd.DataFrame(rows).T
+        st.dataframe(df_tl.style.format(_METRIC_FMT), width="stretch")
+        verdict = ("现用的月首日恰好是四个调仓日里**最好**的一个——报数字时该用错峰口径，"
+                   "否则虚高" if tl["current_is_best"] else
+                   "现用的月首日是四个里**最差**的一个——现有文档数字偏保守，不是虚高"
+                   if tl["current_is_worst"] else
+                   "现用的月首日居中，没有明显挑到好日子")
+        st.caption(
+            f"年化收益跨度 **{tl['spread_cagr_bps']:.0f}bp**"
+            f"（文献典型值约 100bp，Newfound / Hoffstein-Faber-Braun）。{verdict}。\n\n"
+            "错峰组合 = 资金等分 4 份、各按不同调仓日独立跑再求和（tranching），"
+            "是「去掉调仓日运气」的公平估计；文献称其不牺牲收益、纯降方差。"
+            "**散布大不等于策略差**——要看错峰组合是否仍站得住。"
+        )
+
+        st.markdown("**② 分段 vs ③ 池子等权（公平基准）**")
+        recs = {}
+        for w in rep["windows"]:
+            recs[f"{w['label']}｜策略(错峰)"] = _fmt_metrics_row(w["strategy"])
+            if w["pool_ew"]:
+                recs[f"{w['label']}｜★池子等权"] = _fmt_metrics_row(w["pool_ew"])
+        st.dataframe(pd.DataFrame(recs).T.style.format(_METRIC_FMT), width="stretch")
+        pool_txt = "、".join(rep["pool_symbols"])
+        def_txt = ("；已排除避险/现金腿 " + "、".join(rep["defensive_symbols"])
+                   if rep["defensive_symbols"] else "")
+        rng = rep["excess_range"]
+        st.caption(
+            f"★池子等权 = 与策略共享候选名单的等权持有（{pool_txt}{def_txt}），"
+            "是判断「选择有没有加信息」的公平对照。**别拿 SPY/QQQ/XLK 这类事后赢家当基准。**"
+            + (f"\n\n**期望区间：分段超额年化 {rng[0]:+.1%} ~ {rng[1]:+.1%}。**"
+               "点估计取区间内的中间水平而不是最大值；最坏那一段是你真的要扛的东西——"
+               "策略有时效性，好因子也会连输很多年（价值输了 13 年、动量 2009 崩过），"
+               "所以这里刻意不给「通过/不通过」。事前分不清哪个策略在当季，"
+               "实操解药是同时持有几个低相关策略，而不是找那个永远有效的。"
+               if rng else "")
+            + "\n\n同时看夏普和 Calmar：集中型策略常见「赢 Calmar 输夏普」，"
+              "那是集中度换来的回撤形状而非风险调整效率，只报有利的那个就是虚高。"
+        )
 
 
 def _render_portfolio_bt(strategy_name: str, params: dict):
@@ -1058,6 +1127,8 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
                    entry_texts, [t["symbol"] for t in result.trades])
     eq.update_layout(height=400, title=f"{strategy_name} 组合权益曲线（{result.start} ~ {result.end}）")
     st.plotly_chart(eq, width="stretch")
+
+    _render_robustness(strategy_name, params, prices)
 
     trades_table(result.trades, with_symbol=True)
     if result.open_positions:

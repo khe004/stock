@@ -342,3 +342,90 @@ def test_episode_returns_total_return_window():
     r = episode_returns(prices, idx[0], idx[-1], ["TLT", "DBC"])
     assert r["TLT"] < 0 < r["DBC"]
     assert abs(r["DBC"] - 0.20) < 1e-6
+
+
+# ── 稳健性检验（调仓日 timing luck / 分段 / 池子等权）────────────────────────
+
+def test_month_anchors_offset_picks_nth_trading_day():
+    from quant.strategies.base import month_anchors
+    idx = pd.bdate_range("2024-01-01", "2024-04-30")
+    assert list(month_anchors(idx, 0)[:2]) == [pd.Timestamp("2024-01-01"),
+                                               pd.Timestamp("2024-02-01")]
+    # offset=5 → 每月第 6 个交易日
+    assert list(month_anchors(idx, 5)[:2]) == [pd.Timestamp("2024-01-08"),
+                                               pd.Timestamp("2024-02-08")]
+    assert len(month_anchors(idx, 0)) == len(month_anchors(idx, 5)) == 4
+    assert len(month_anchors(pd.DatetimeIndex([]), 3)) == 0
+
+
+def test_month_anchors_skips_months_too_short():
+    from quant.strategies.base import month_anchors
+    # 一月只有 3 个交易日 → offset=5 时该月无锚点
+    idx = pd.DatetimeIndex(list(pd.bdate_range("2024-01-01", periods=3))
+                           + list(pd.bdate_range("2024-02-01", periods=10)))
+    assert len(month_anchors(idx, 0)) == 2
+    assert len(month_anchors(idx, 5)) == 1
+
+
+def test_rebalance_offset_changes_signal_dates_but_default_is_month_first():
+    from quant import strategies
+    from quant.strategies.base import month_anchors
+    rng = np.random.default_rng(0)
+    prices = {}
+    for i, sym in enumerate(["A", "B", "C", "D"]):
+        walk = 100 * np.exp(np.cumsum(rng.normal(0.0004 * (i + 1), 0.01, 700)))
+        prices[sym] = make_df(walk, start="2022-01-03")
+    params = {"lookback_days": 252, "skip_days": 21, "top_n": 2}
+    idx = prices["A"].index
+    base = strategies.build("momentum", params).generate(prices)
+    assert base, "基准信号不应为空"
+    first_days = {d.strftime("%Y-%m-%d") for d in month_anchors(idx, 0)}
+    assert {s.date for s in base} <= first_days      # 默认 = 月首日，行为未变
+
+    shifted = strategies.build("momentum", {**params, "rebalance_offset": 10}).generate(prices)
+    tenth = {d.strftime("%Y-%m-%d") for d in month_anchors(idx, 10)}
+    assert {s.date for s in shifted} <= tenth
+    assert {s.date for s in shifted} != {s.date for s in base}
+
+
+def test_equal_weight_equity_subset_excludes_defensive_leg():
+    from quant.analysis.robustness import defensive_symbols, equal_weight_equity
+    prices = {"A": make_df(np.linspace(100, 200, 60)),      # 翻倍
+              "TLT": make_df(np.linspace(100, 50, 60))}     # 腰斩
+    params = {"safe_assets": ["TLT"], "cash_asset": "BIL"}
+    assert defensive_symbols(params) == {"TLT", "BIL"}
+    pool = {s for s in prices if s not in defensive_symbols(params)}
+    only_a = equal_weight_equity(prices, 10_000.0, pool)
+    both = equal_weight_equity(prices, 10_000.0)
+    assert only_a.iloc[-1] > both.iloc[-1]                  # 排除避险腿后基准更高
+    assert equal_weight_equity({}, 10_000.0) is None
+
+
+def test_split_windows_covers_history_without_gap():
+    from quant.analysis.robustness import split_windows
+    idx = pd.bdate_range("2015-01-01", "2026-01-01")
+    w = split_windows(idx, 2)
+    assert len(w) == 2
+    assert w[0][1] == idx[0].strftime("%Y-%m-%d")
+    assert w[-1][2] == idx[-1].strftime("%Y-%m-%d")
+    assert w[0][2] == w[1][1]                               # 前段末 = 后段初，无缺口
+    assert split_windows(pd.DatetimeIndex([]), 2) == []
+
+
+def test_timing_luck_sweep_reports_spread_and_tranche():
+    from quant.analysis.robustness import timing_luck_sweep
+    rng = np.random.default_rng(7)
+    prices = {}
+    for i, sym in enumerate(["A", "B", "C", "D"]):
+        walk = 100 * np.exp(np.cumsum(rng.normal(0.0003 * (i + 1), 0.012, 900)))
+        prices[sym] = make_df(walk, start="2021-01-04")
+    out = timing_luck_sweep("momentum",
+                            {"lookback_days": 252, "skip_days": 21, "top_n": 2},
+                            prices, 10_000.0, 5.0)
+    assert len(out["per_offset"]) == 4
+    assert out["per_offset"][0]["offset"] == 0
+    assert out["spread_cagr_bps"] >= 0
+    # 错峰组合应落在各单口径之间（不牺牲收益、纯降方差）
+    cagrs = [r["cagr"] for r in out["per_offset"]]
+    assert min(cagrs) - 1e-9 <= out["tranched"]["cagr"] <= max(cagrs) + 1e-9
+    assert out["current_is_best"] == (cagrs[0] == max(cagrs))

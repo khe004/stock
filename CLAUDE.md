@@ -23,7 +23,9 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
   每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY
 - `quant/backtest/engine.py`：单标的、组合轮动（同日先卖后买、资金不出场）、智能定投三种模拟；
   `vol_scaled_equity` 纯函数（无杠杆波动率缩放，降回撤/尾部，实测不提升夏普；仅分析用不改实盘信号）
-- `quant/analysis/`：market.py（52周区间位置/行业宽度/收益率利差，纯计算给市场概览页用）、
+- `quant/analysis/`：robustness.py（**稳健性检验**：调仓日 timing luck 散布 + 错峰 tranching +
+  分段 + 池子等权公平基准；**输出期望区间不出通过/不通过**，定位见该文件文档头）、
+  market.py（52周区间位置/行业宽度/收益率利差，纯计算给市场概览页用）、
   scoring.py（signal_forward_returns 逐信号算 5/20/60 日前瞻收益，给策略评分页用）、
   correlation.py（策略相关性/组合诊断：各策略权益曲线转日收益率→Pearson相关矩阵→等权组合分散效果）、
   screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面]+价值半[forward盈利收益率+EV/EBITDA收益率双口径的行业内百分位，抗一次性收益畸变；金融EV/EBITDA失效则只用forward]，当前基本面快照非point-in-time）
@@ -77,17 +79,24 @@ aggressive_mom 改持 BIL（1-3月短债 ETF，近零波动零久期，2007+ 全
    收益率），不喂给任何策略，只供市场概览页的瓷砖和情绪红绿灯用。
 8. **策略评分 ≠ 回测**：评分页用 `signal_forward_returns` 只看单条信号发出后 N 日涨跌
    （不含仓位/成本），回测是机械执行整套策略的资金曲线模拟——两者故意不同，互为补充。
-9. **稳健性有两根正交的轴，月频策略的结论两根都要过**（2026-07-27 起）：
-   - **walk-forward**：换个时间段还成立吗（切 2015-2020 / 2021-2026 或 4 段）。
-   - **调仓日 timing luck**（Newfound / Hoffstein-Faber-Braun）：换个调仓日还成立吗。
-     所有月频策略都用 `groupby([year, month]).head(1)` 锚在"每月首个交易日"，这是个
-     **未经检验的隐含选择**。诊断法：monkeypatch `DataFrameGroupBy.head` 让 `head(1)`
-     变成 `.nth(k)`，k 取 0/5/10/15（≈4 个周度错峰 tranche），其余不变看结果散布；
-     "去掉运气"的公平估计 = 4 个 tranche 各 1/4 资金独立跑再求和。
+9. **稳健性检验回答的是「数字有没有虚高」，不是「有没有 alpha」**（2026-07-27 定调）。
+   11 年月频、收益按 regime 高度自相关 → 独立观测只有 2-3 个，**任何检验都没有统计功效
+   去证明 alpha**。所以三根检验轴都只用来校准期望值，**输出期望区间、不出通过/不通过**：
+   - **walk-forward**：是不是靠单一 regime 撑起来的（切前后两半或 4 段）。
+   - **调仓日 timing luck**（Newfound / Hoffstein-Faber-Braun）：是不是恰好挑中了最好的
+     调仓日。所有月频策略默认锚在"每月首个交易日"，这是个**未经检验的隐含选择**。
+     实现：`strategies.base.month_anchors(index, offset)` + 各策略的 `rebalance_offset`
+     参数（默认 0 = 原行为），offset 取 0/5/10/15（≈4 个周度错峰 tranche）。
+     "去掉运气"的公平估计 = 4 个 tranche 各 1/4 资金独立跑再求和（tranching）。
      实测年化跨度：cross_asset_mom 569bp（最脆弱，结论被推翻）、aggressive_mom 447bp
      （但错峰后指标不变=真稳）、dual_momentum 209bp、momentum 141bp、low_vol 133bp。
-     **散布大不等于策略差**——要看错峰组合是否仍站得住（aggressive_mom 站得住，
-     cross_asset_mom 站不住）。另外错峰组合普遍拿到"接近平均的收益+明显好于最差的回撤"。
+     **散布大不等于策略差**——看错峰组合是否仍站得住。
+   - **池子等权**：是不是宇宙本身好、而非选择能力（见决策 #3）。
+   **别把"某段跑输"当死刑判决**：价值因子连输 13 年、动量 2009 年崩过，按"每段都要赢"
+   的门槛连有几十年文献支撑的因子都会被误杀。walk-forward 本身分不出"真效应坐冷板凳"
+   与"假象恰好在某段好看"——分开它们靠**先验**（12-1 动量有跨市场独立验证 → 先验强；
+   "top2 比 top3 好"是我们自己在数据里翻出来的 → 先验为零）。判断留给人，工具只给区间。
+   工具：`quant/analysis/robustness.py`，面板在回测页的「🧭 稳健性检验」折叠区。
 
 ## 容器环境（Claude Code 云端）注意
 

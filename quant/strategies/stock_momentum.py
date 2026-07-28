@@ -11,7 +11,8 @@ import pandas as pd
 import yaml
 
 from quant.config import ROOT
-from quant.strategies.base import BUY, SELL, Signal, Strategy, price_series
+from quant.strategies.base import (BUY, SELL, Signal, Strategy,
+                                  month_anchors, price_series)
 
 
 class StockMomentum(Strategy):
@@ -25,7 +26,9 @@ class StockMomentum(Strategy):
                  safe_asset: str = "TLT",
                  universe: list[str] | None = None,
                  sectors: dict[str, str] | None = None,
-                 exclude: list[str] | None = None, **_):
+                 exclude: list[str] | None = None,
+                 rebalance_offset: int = 0, **_):
+        self.rebalance_offset = rebalance_offset  # 调仓日错峰（timing luck 检验用）
         if universe is None:
             with open(ROOT / universe_file, encoding="utf-8") as f:
                 grouped = yaml.safe_load(f)
@@ -53,7 +56,8 @@ class StockMomentum(Strategy):
         dollar = pd.DataFrame({
             s: prices[s]["close"] * prices[s]["volume"] for s in uni
         }).sort_index().rolling(self.liquidity_window).mean()
-        month_firsts = dollar.groupby([dollar.index.year, dollar.index.month]).head(1).index
+        # 月度调仓日：每月第 (rebalance_offset+1) 个交易日（默认月首日）
+        month_firsts = month_anchors(dollar.index, self.rebalance_offset)
         pools = {}
         for ts in month_firsts:
             dv = dollar.loc[ts].dropna()

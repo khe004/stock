@@ -22,18 +22,21 @@
 
 import pandas as pd
 
-from quant.strategies.base import BUY, SELL, Signal, Strategy, price_series
+from quant.strategies.base import (BUY, SELL, Signal, Strategy,
+                                  month_anchors, price_series)
 
 
 class DualMomentum(Strategy):
     name = "dual_momentum"
 
     def __init__(self, lookback_days: int = 252, risk_assets=("SPY", "QQQ"),
-                 safe_asset: str = "TLT", cash_asset: str = "BIL", **_):
+                 safe_asset: str = "TLT", cash_asset: str = "BIL",
+                 rebalance_offset: int = 0, **_):
         self.lookback = lookback_days
         self.risk_assets = list(risk_assets)
         self.safe_asset = safe_asset
         self.cash_asset = cash_asset
+        self.rebalance_offset = rebalance_offset  # 调仓日错峰（timing luck 检验用）
 
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         risk = [a for a in self.risk_assets if a in prices]
@@ -49,7 +52,8 @@ class DualMomentum(Strategy):
         rets = pd.DataFrame(
             {s: price_series(prices[s]) for s in cols}
         ).sort_index().pct_change(self.lookback, fill_method=None)
-        month_firsts = closes.groupby([closes.index.year, closes.index.month]).head(1).index
+        # 月度调仓日：每月第 (rebalance_offset+1) 个交易日（默认月首日）
+        month_firsts = month_anchors(closes.index, self.rebalance_offset)
 
         signals: list[Signal] = []
         held: str | None = None

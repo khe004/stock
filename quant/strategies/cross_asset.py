@@ -44,7 +44,8 @@ aggressive_mom 全进全出、无此歧义，才接 BIL）。
 
 import pandas as pd
 
-from quant.strategies.base import BUY, SELL, Signal, Strategy, price_series
+from quant.strategies.base import (BUY, SELL, Signal, Strategy,
+                                  month_anchors, price_series)
 
 
 class CrossAssetMomentum(Strategy):
@@ -58,11 +59,13 @@ class CrossAssetMomentum(Strategy):
     name = "cross_asset_mom"
 
     def __init__(self, lookback_days: int = 252, skip_days: int = 21,
-                 top_n: int = 3, abs_momentum: bool = True, **_):
+                 top_n: int = 3, abs_momentum: bool = True,
+                 rebalance_offset: int = 0, **_):
         self.lookback = lookback_days
         self.skip = skip_days
         self.top_n = top_n
         self.abs_momentum = abs_momentum
+        self.rebalance_offset = rebalance_offset  # 调仓日错峰（timing luck 检验用）
 
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         if len(prices) <= self.top_n:
@@ -74,10 +77,8 @@ class CrossAssetMomentum(Strategy):
         # 12-1 动量：t-skip 相对 t-lookback 的收益（与 momentum / stock_momentum 口径一致）
         mom = adj.shift(self.skip) / adj.shift(self.lookback) - 1
 
-        # 月度调仓日：每月首个交易日
-        month_firsts = closes.groupby(
-            [closes.index.year, closes.index.month]
-        ).head(1).index
+        # 月度调仓日：每月第 (rebalance_offset+1) 个交易日（默认月首日）
+        month_firsts = month_anchors(closes.index, self.rebalance_offset)
 
         signals: list[Signal] = []
         held: set[str] = set()  # 当前持有的标的

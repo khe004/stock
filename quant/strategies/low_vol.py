@@ -19,7 +19,8 @@ stock_momentum，三者相关性约 0.51）提供低相关的分散来源。
 import numpy as np
 import pandas as pd
 
-from quant.strategies.base import BUY, SELL, Signal, Strategy, price_series
+from quant.strategies.base import (BUY, SELL, Signal, Strategy,
+                                  month_anchors, price_series)
 
 
 class LowVol(Strategy):
@@ -31,9 +32,11 @@ class LowVol(Strategy):
 
     name = "low_vol"
 
-    def __init__(self, lookback_days: int = 90, top_n: int = 3, **_):
+    def __init__(self, lookback_days: int = 90, top_n: int = 3,
+                 rebalance_offset: int = 0, **_):
         self.lookback = lookback_days
         self.top_n = top_n
+        self.rebalance_offset = rebalance_offset  # 调仓日错峰（timing luck 检验用）
 
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         """对全量历史生成低波动选股信号。
@@ -55,10 +58,8 @@ class LowVol(Strategy):
         # 滚动年化波动率 = 日收益率的 lookback 日滚动标准差 × √252
         vol = daily_ret.rolling(self.lookback).std() * np.sqrt(252)
 
-        # 月度调仓日：每月首个交易日
-        month_firsts = closes.groupby(
-            [closes.index.year, closes.index.month]
-        ).head(1).index
+        # 月度调仓日：每月第 (rebalance_offset+1) 个交易日（默认月首日）
+        month_firsts = month_anchors(closes.index, self.rebalance_offset)
 
         signals: list[Signal] = []
         held: set[str] = set()  # 当前持有的标的
