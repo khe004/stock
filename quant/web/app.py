@@ -20,9 +20,9 @@ from quant.analysis.correlation import (
     suggest_low_corr_set,
 )
 from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
-from quant.analysis.robustness import (equal_weight_equity, leverage_to_target_vol,
-                                      levered_returns, robustness_report,
-                                      split_windows)
+from quant.analysis.robustness import (defensive_symbols, equal_weight_equity,
+                                      leverage_to_target_vol, levered_returns,
+                                      robustness_report, split_windows)
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.analysis.screening import compute_strength, market_regime
 from quant.backtest.engine import (
@@ -1200,6 +1200,56 @@ def _render_robustness(strategy_name: str, params: dict,
         )
 
 
+def _render_universe_pool(strategy_name: str, params: dict, universe: list[str]) -> None:
+    """标的池一览：按角色（候选/进攻、哨兵、防守、避险、现金）分组显示。
+
+    不同策略的候选池差异很大（板块11只 vs 跨资产9类 vs 个股485只动态池 vs 进攻档8只），
+    之前只能从下面的交易明细反推，加这行省得每次都要数交易记录。
+
+    角色划分复用 defensive_symbols()（robustness.py 已在用同一套口径排除公平基准），
+    但 dual_momentum 例外——它的 `groups` 为了给市场概览等页面提供数据，混进了
+    risk_assets 之外从不参与策略逻辑的标的（IWM/DIA/GLD/IBIT），所以显式用
+    risk_assets 参数而非"universe 减防守类"，否则会把没用到的标的也算进候选池。
+    """
+    if strategy_name == "stock_momentum":
+        uf = params.get("universe_file", "")
+        n_super = len(cfg.universe_symbols(uf)) if uf else len(universe)
+        st.caption(
+            f"🎯 标的池：**动态流动性池**（非固定名单，point-in-time）——候选超集 {n_super} 只"
+            f"（`{uf}`），每月按近 {params.get('liquidity_window', 20)} 日平均成交额取前 "
+            f"{params.get('pool_size', 100)} 名，持有动量最强的 {params.get('top_n', 6)} 只"
+            f"（单行业上限 {params.get('max_per_sector', 2)} 只），"
+            f"大盘破 {params.get('regime_ma', 200)} 日均线整体切避险 "
+            f"{etf_label(params.get('safe_asset', 'TLT'))}。"
+        )
+        return
+
+    defensive = defensive_symbols(params)
+    if params.get("risk_assets"):
+        offense = [s for s in params["risk_assets"] if s in universe]
+    else:
+        offense = [s for s in universe if s not in defensive]
+
+    parts = [f"🎯 标的池（共 {len(universe)} 只）"]
+    if offense:
+        parts.append(f"**候选/进攻 {len(offense)} 只**：" + "、".join(etf_label(s) for s in offense))
+    canary = [s for s in (params.get("canary_assets") or []) if s in universe]
+    if canary:
+        parts.append(f"**哨兵 {len(canary)} 只**（只判断风险开关，不参与持仓）：" +
+                     "、".join(etf_label(s) for s in canary))
+    defense = [s for s in (params.get("defense_assets") or []) if s in universe]
+    if defense:
+        parts.append(f"**防守腿 {len(defense)} 只**：" + "、".join(etf_label(s) for s in defense))
+    safe_raw = params.get("safe_assets") or ([params["safe_asset"]] if params.get("safe_asset") else [])
+    safe = [s for s in safe_raw if s in universe and s not in canary and s not in defense]
+    if safe:
+        parts.append(f"**避险腿 {len(safe)} 只**：" + "、".join(etf_label(s) for s in safe))
+    cash = params.get("cash_asset")
+    if cash and cash in universe and cash not in canary and cash not in defense and cash not in safe:
+        parts.append(f"**现金等价**：{etf_label(cash)}")
+    st.caption("；".join(parts) + "。")
+
+
 def _render_portfolio_bt(strategy_name: str, params: dict):
     universe = cfg.symbols_for(params.get("groups", []))
     if params.get("universe_file"):
@@ -1221,6 +1271,7 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
                f"基准：SPY长持（风险标杆）+ QQQ长持（增长标杆）固定对照，部分策略另有"
                f"专属公平基准（板块等权/池子等权/等权全资产）。理想=收益/年化/夏普优于"
                f"QQQ、回撤/Calmar 优于 SPY。")
+    _render_universe_pool(strategy_name, params, universe)
 
     if params.get("universe_file"):
         excluded = st.multiselect(
@@ -1447,13 +1498,15 @@ def _render_vix_bt(params: dict):
 
 
 STRATEGY_CATEGORIES = {
-    "研究中": ["cross_asset_mom", "aggressive_mom", "momentum", "dual_momentum", "low_vol"],
+    "研究中": ["cross_asset_mom", "aggressive_mom", "momentum", "dual_momentum", "low_vol",
+             "canary_mom"],
     "定投": ["smart_dca"],
     "仅观察": ["stock_momentum", "sma_cross", "rsi_reversal", "vix_regime"],
 }
 STRATEGY_CATEGORY_NOTE = {
     "研究中": "在风险或收益上有可取之处、仍在打磨（稳健档 cross_asset_mom、进攻档 "
-              "aggressive_mom、板块 12-1 momentum、GEM dual_momentum、低波动 low_vol）。",
+              "aggressive_mom、板块 12-1 momentum、GEM dual_momentum、低波动 low_vol、"
+              "哨兵动量 canary_mom——已进入推荐模型组合，但尚无样本外记录）。",
     "定投": "定期定额、非择时——单独一类（口径以后可再细化）。",
     "仅观察": "早期测试或已验证无可复制的独立 alpha，仅作观察对照，勿据此实盘。",
 }
