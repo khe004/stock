@@ -104,6 +104,42 @@ fast_exit=True：哨兵盘中转负、且当前仍持有进攻仓时，**不等�
 → 因此默认 `fast_exit=False`，保持原有已验证的两段稳健版本不变。是否切换由用户
   按自己对"愿不愿意为更强的崩盘保护牺牲一部分收益、且愿意更频繁盯盘"的偏好决定，
   这是价值判断不是纯技术判断，本文档只负责把权衡摆干净。
+
+【risk_off_threshold 参数，2026-07-30 新增，默认 0.0（跟 <=0 触发完全一样，不改变
+上面任何数字）】用户追问：既然 32 次紧急触发只有 1 次是真危机，加个更深的阈值
+（比如动量要 ≤-3% 才触发，不是随便转负就触发）能不能把"假阳性"筛掉？
+
+**先用相关性戳破了这个假设的前提，再拿真实回测验证**：把全历史 35 次月度触发按
+哨兵动量深度排序，和触发后 3 个月 SPY 实际涨跌算相关系数——**r=+0.118，基本无关**。
+2022 年那批最深的触发（-27%/-18%/-16%…）好几次后面 SPY 反而涨 4%~11%；而
+2020-04-01 那次触发只有 -2.30%（全表偏浅的一档），触发后 3 个月 SPY 却涨了 +26.7%
+——说明当时的问题不是"信号太弱没触发"，是市场已经见底、防守反而错过反弹。**13612W
+是向后看的指标，触发的深浅不携带"接下来会更危险"的信息**，所以深度阈值筛不出
+"真危机 vs 假警报"，只能筛出"缓慢下跌 vs 温和下跌"——这是两件不同的事。
+
+实测扫了几档阈值（月频版，未叠加 fast_exit）：
+
+  阈值    触发次数  全历史收益/夏普/Calmar        2020新冠段最深回撤
+   0%      22      +207% / 0.97 / 0.52           -19.8%
+  -1%      21      +215% / 0.96 / 0.52           -19.9%
+  -2%      17      +226% / 0.96 / 0.55           -19.7%
+  -3%      16      +228% / 0.95 / 0.55           -19.7%
+  -5%      11      +224% / 0.91 / 0.54           -19.8%
+  -8%       7      +210% / 0.85 / 0.49           -21.0%
+
+- **新冠段回撤在整个阈值区间里几乎纹丝不动**——因为 2020-04-01 那次触发本来就只有
+  -2.30%，任何比它更深的阈值直接取消这次触发（等于完全不防守），并没有"修好"它，
+  跟月频架构本身的滞后无关，是阈值动不了这个问题。
+- **-1%~-3% 温和收窄反而全历史收益略升**（+207%→+228%），大概率是砍掉了一部分
+  贴着零线的短暂来回（20 次里最靠近零的那些噪声），但夏普基本没变、Calmar 略升；
+  **超过 -5% 就开始变差**，触发次数太少、防守基本形同虚设（walk-forward 后半段
+  夏普差转负）。
+- **诚实提醒：上面这张表本身就是在扫一个连续参数找好看的值**，跟 backlog 里反复
+  拒绝的"调 lookback/skip/波动窗口找 in-sample 最优"是同一类陷阱。-2%~-3% 看着
+  最好，但这就是"调出来的"，不是先验支持的，下次样本变了不保证还是它。
+→ 因此默认 `risk_off_threshold=0.0`，不采纳任何具体阈值。这条探索最大的价值不是
+  "该设成多少"，是证伪了"触发越深越危险"这个直觉——以后再有人想靠加阈值筛哨兵
+  信号，先看这条记录。
 """
 
 import pandas as pd
@@ -134,7 +170,7 @@ class CanaryMomentum(Strategy):
                  top_n: int = 3, canary_assets=("TIP",),
                  defense_assets=("IEF", "BIL"), cash_asset: str = "BIL",
                  abs_momentum: bool = False, rebalance_offset: int = 0,
-                 fast_exit: bool = False, **_):
+                 fast_exit: bool = False, risk_off_threshold: float = 0.0, **_):
         self.lookback = lookback_days
         self.skip = skip_days
         self.top_n = top_n
@@ -144,6 +180,7 @@ class CanaryMomentum(Strategy):
         self.abs_momentum = abs_momentum
         self.rebalance_offset = rebalance_offset  # 调仓日错峰（timing luck 检验用）
         self.fast_exit = fast_exit  # 哨兵盘中转负是否立即调出（不必等下个月首日），见类文档
+        self.risk_off_threshold = risk_off_threshold  # 触发防守的动量阈值（实测无效，见类文档）
 
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         canary = [s for s in self.canary_assets if s in prices]
@@ -181,7 +218,7 @@ class CanaryMomentum(Strategy):
             can_row = fast.loc[ts, canary].dropna()
             if len(can_row) < len(canary):
                 continue                      # 哨兵窗口未满，本日不动
-            risk_off = bool((can_row <= 0).any())
+            risk_off = bool((can_row <= self.risk_off_threshold).any())
             is_anchor = ts in anchors
 
             if is_anchor:

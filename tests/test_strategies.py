@@ -889,3 +889,33 @@ def test_fast_exit_does_not_block_later_scheduled_anchor_rebalances():
     # 切回去的理由必须是正常的月度排名逻辑，不是"平仓恢复"式的措辞
     buy_back = next(s for s in later_anchor_sigs if s.direction == BUY)
     assert "哨兵全为正" in buy_back.reason and "12-1 动量" in buy_back.reason
+
+
+# ── canary_mom：risk_off_threshold（触发防守的动量阈值）──────────────────
+
+def test_risk_off_threshold_default_zero_matches_no_threshold():
+    prices = _canary_prices(-40)
+    default = strategies.build("canary_mom", dict(top_n=2, canary_assets=["TIP"],
+                                                   defense_assets=["IEF", "BIL"])).generate(prices)
+    explicit = strategies.build("canary_mom", dict(top_n=2, canary_assets=["TIP"],
+                                                    defense_assets=["IEF", "BIL"],
+                                                    risk_off_threshold=0.0)).generate(prices)
+    key = lambda s: (s.date, s.symbol, s.direction, s.reason)
+    assert [key(s) for s in default] == [key(s) for s in explicit]
+
+
+def test_risk_off_threshold_shifts_trigger_point():
+    """阈值调深后，轻微为负（未达阈值）应仍判定风险开启；只有更深的负值才触发防守。"""
+    params_shallow = dict(top_n=2, canary_assets=["TIP"], defense_assets=["IEF", "BIL"])
+    params_deep = {**params_shallow, "risk_off_threshold": -0.5}   # 极深阈值，几乎不会触发
+
+    prices = _canary_prices(-5)  # 哨兵温和下行（不是暴跌）
+    shallow_sigs = strategies.build("canary_mom", params_shallow).generate(prices)
+    deep_sigs = strategies.build("canary_mom", params_deep).generate(prices)
+
+    shallow_defense_buys = {s.symbol for s in shallow_sigs
+                            if s.direction == BUY and s.symbol in ("IEF", "BIL")}
+    deep_defense_buys = {s.symbol for s in deep_sigs
+                         if s.direction == BUY and s.symbol in ("IEF", "BIL")}
+    assert shallow_defense_buys        # 阈值=0 时温和下行足以触发防守
+    assert not deep_defense_buys       # 阈值=-50% 时同样的温和下行不该触发
