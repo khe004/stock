@@ -855,3 +855,37 @@ def test_fast_exit_does_not_retrigger_while_already_in_defense():
     emergency_sells = [s for s in sigs if "紧急" in s.reason and s.direction == SELL]
     # 只有一只进攻标的（SPY），一次触发后组合已空仓进攻腿，不应再有第二次紧急卖出
     assert len(emergency_sells) == 1
+
+
+def test_fast_exit_does_not_block_later_scheduled_anchor_rebalances():
+    """紧急调出之后，后续月首日必须继续正常评估——危机解除后能正常切回进攻组合。"""
+    idx = pd.bdate_range("2022-01-03", periods=800)
+    n = len(idx)
+    from quant.strategies.base import month_anchors
+    anchors = [a for a in month_anchors(idx, 0)
+              if pd.Timestamp("2024-08-01") <= a <= pd.Timestamp("2024-12-01")]
+    i0 = idx.get_loc(anchors[1])  # 2024-10-01 附近
+    canary = np.concatenate([
+        np.linspace(100, 150, i0 + 3),
+        np.linspace(150, 125, 10),                   # 急跌→触发盘中紧急调出
+        np.linspace(125, 155, n - i0 - 13),           # 随后持续反弹，下下个月首日应已转正
+    ])
+    prices = {
+        "SPY": _df(np.linspace(100, 300, n), idx), "QQQ": _df(np.linspace(100, 120, n), idx),
+        "TIP": _df(canary, idx),
+        "IEF": _df(np.linspace(100, 110, n), idx), "BIL": _df(np.linspace(100, 102, n), idx),
+    }
+    params = dict(lookback_days=252, skip_days=21, top_n=1, canary_assets=["TIP"],
+                  defense_assets=["IEF", "BIL"], cash_asset="BIL", abs_momentum=False,
+                  fast_exit=True)
+    sigs = strategies.build("canary_mom", params).generate(prices)
+
+    emergency = [s for s in sigs if "紧急" in s.reason]
+    assert emergency and emergency[0].direction == SELL and emergency[0].symbol == "SPY"
+
+    later_anchor_sigs = [s for s in sigs if s.date == "2024-11-01"]
+    assert any(s.direction == SELL and s.symbol == "IEF" for s in later_anchor_sigs)
+    assert any(s.direction == BUY and s.symbol == "SPY" for s in later_anchor_sigs)
+    # 切回去的理由必须是正常的月度排名逻辑，不是"平仓恢复"式的措辞
+    buy_back = next(s for s in later_anchor_sigs if s.direction == BUY)
+    assert "哨兵全为正" in buy_back.reason and "12-1 动量" in buy_back.reason
