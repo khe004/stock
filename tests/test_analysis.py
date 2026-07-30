@@ -445,3 +445,30 @@ def test_config_model_portfolio_is_explicit_and_consistent():
     params = dict(cfg.enabled_strategies())
     silent = [s for s in mp if not params[s].get("notify", True)]
     assert not silent, f"推荐配方成分未开启推送：{silent}"
+
+
+def test_levered_returns_charges_financing_and_scales_drawdown():
+    from quant.analysis.robustness import leverage_to_target_vol, levered_returns
+    idx = pd.bdate_range("2022-01-03", periods=500)
+    rng = np.random.default_rng(11)
+    r = pd.Series(rng.normal(0.0004, 0.010, 500), index=idx)
+    cash = pd.Series(0.02 / 252, index=idx)            # 年化 2% 的无风险利率
+
+    # k=1 时与原序列完全一致（不收融资费）
+    assert np.allclose(levered_returns(r, 1.0, cash, 0.005), r)
+    # 融资价差越高，收益越低
+    a = (1 + levered_returns(r, 2.0, cash, 0.0)).prod()
+    b = (1 + levered_returns(r, 2.0, cash, 0.02)).prod()
+    assert a > b
+    # 杠杆放大波动与回撤
+    lev = levered_returns(r, 2.0, cash, 0.005)
+    assert lev.std() > 1.9 * r.std()
+    def dd(x):
+        eq = (1 + x).cumprod()
+        return float((eq / eq.cummax() - 1).min())
+    assert dd(lev) < dd(r)
+    # 目标波动率反解
+    k = leverage_to_target_vol(r, float(r.std() * np.sqrt(252)) * 1.5)
+    assert abs(k - 1.5) < 1e-9
+    assert leverage_to_target_vol(pd.Series([0.0] * 10), 0.2) != leverage_to_target_vol(
+        pd.Series([0.0] * 10), 0.2)   # 零波动 → NaN

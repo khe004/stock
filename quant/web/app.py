@@ -20,7 +20,8 @@ from quant.analysis.correlation import (
     suggest_low_corr_set,
 )
 from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
-from quant.analysis.robustness import (equal_weight_equity, robustness_report,
+from quant.analysis.robustness import (equal_weight_equity, leverage_to_target_vol,
+                                      levered_returns, robustness_report,
                                       split_windows)
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
 from quant.analysis.screening import compute_strength, market_regime
@@ -729,6 +730,69 @@ def render_correlation():
     _render_model_portfolio(aligned, corr)
 
 
+def _render_leverage(combo_daily: pd.Series, combo_m: dict) -> None:
+    """杠杆分析：把组合的高夏普换成收益，能不能追上 QQQ。**仅分析用，不改实盘信号。**"""
+    with st.expander("⚖️ 杠杆分析（把夏普换成收益，追 QQQ 的绝对收益）", expanded=False):
+        st.caption(
+            "本平台的胜利一直集中在**风险轴**（夏普/回撤），绝对收益却输 QQQ。"
+            "「高夏普低收益」的教科书解法是加杠杆——但只有在夏普**确实**更高时才成立"
+            "（AQR《Risk Parity: Why We Lever》）。这里诚实地检验换不换得动：融资成本按 "
+            "**BIL 日收益 + 你设的价差**扣，每日再平衡杠杆天然含波动率拖累，回撤直接看数字。"
+        )
+        bil_df = store.load_prices(conn, "BIL")
+        if bil_df.empty:
+            st.warning("库内没有 BIL 行情，无法建模融资成本")
+            return
+        cash = price_series(bil_df).pct_change(fill_method=None).reindex(
+            combo_daily.index).fillna(0.0)
+
+        c1, c2 = st.columns(2)
+        spread_bp = c1.slider("融资价差（bp/年，BIL 之上）", 0, 300, 50, 25,
+                              help="期货基差约 25~50bp；资本效率 ETF 费率约 100bp；零售融资券 150bp+")
+        target = c2.radio("杠杆到谁的波动率", ["SPY（保守）", "QQQ（激进）", "不加杠杆"],
+                          index=0, horizontal=True, key="lev_target")
+
+        rows: dict[str, dict] = {"组合（1.0x）": combo_m}
+        bench_m: dict[str, dict] = {}
+        for b in ("SPY", "QQQ"):
+            bdf = store.load_prices(conn, b)
+            if bdf.empty:
+                continue
+            br = price_series(bdf).pct_change(fill_method=None).reindex(
+                combo_daily.index).fillna(0.0)
+            bench_m[b] = equity_metrics(INITIAL_CASH * (1 + br).cumprod(), INITIAL_CASH)
+            rows[f"{b} 长持"] = bench_m[b]
+
+        k = 1.0
+        if target != "不加杠杆" and bench_m:
+            tgt = bench_m["SPY" if target.startswith("SPY") else "QQQ"]["volatility"]
+            k = leverage_to_target_vol(combo_daily, tgt)
+            for kk in sorted({round(k, 2), 1.25, 1.5, 2.0}):
+                lev = levered_returns(combo_daily, kk, cash, spread_bp / 10_000)
+                label = f"杠杆 {kk:.2f}x" + ("（= 目标波动）" if abs(kk - k) < 1e-9 else "")
+                rows[label] = equity_metrics(INITIAL_CASH * (1 + lev).cumprod(), INITIAL_CASH)
+
+        st.dataframe(
+            pd.DataFrame(rows).T.rename(columns=RISK_COLS).style.format(
+                {"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
+                 "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}),
+            width="stretch")
+
+        if target != "不加杠杆" and k == k:
+            st.caption(
+                f"到目标波动需要 **{k:.2f}x**。注意夏普会**下降**（融资成本 + 波动率拖累），"
+                "杠杆买的是收益不是效率。\n\n"
+                "**⚠️ 这不是一个可以直接照做的方案，四个坎**：\n"
+                "1. **市面上没有产品在给我们这个组合加杠杆。** NTSX / RSST 加的是它们自己的策略。"
+                "要杠杆我们的信号只能靠融资券或期货——本平台只发信号不下单，这一步得你自己承担。\n"
+                "2. **常数杠杆要每日再平衡**，与本平台「月频低换手」的定位冲突；按月或按带宽再平衡"
+                "会产生这里没建模的路径差异。\n"
+                "3. **保证金追缴没建模**。回撤最深处被迫减仓，实际结果会比表里差得多。\n"
+                "4. **整件事押在夏普估计上**，而 11 年样本的夏普误差棒很大，且组合的夏普优势"
+                "有相当一部分是分散的数学结果 + 配方的 in-sample 选择。真实夏普若低一档，优势就没了。"
+            )
+
+
 def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
     """模型组合（Model Portfolio）：自选几个低相关策略等权，对比单策略与长持基准。
 
@@ -855,6 +919,8 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
             "也不要因为某个成分在某段跑输就把它踢掉——好因子连输很多年是常态"
             "（价值输了 13 年），事后按近期表现换策略本身就是一种过拟合。"
         )
+
+    _render_leverage(sub.mean(axis=1), combo_m)
 
     eqfig = go.Figure(go.Scatter(x=combo_eq.index, y=combo_eq, mode="lines",
                                  name="🧺 模型组合", line=dict(width=3, color="#2196f3")))

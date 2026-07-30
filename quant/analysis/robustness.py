@@ -134,6 +134,32 @@ def timing_luck_sweep(strategy_name: str, params: dict,
     }
 
 
+def levered_returns(daily: pd.Series, k: float, cash_daily: pd.Series,
+                    spread: float = 0.005) -> pd.Series:
+    """常数杠杆日收益：k 倍策略收益 − (k−1) 倍融资成本。**仅分析用，不改实盘信号。**
+
+    为什么需要这个：本平台的胜利一直集中在风险轴（夏普/回撤），绝对收益却输 QQQ。
+    高夏普低收益的教科书解法是加杠杆——把夏普换成收益。这个函数用来诚实地检验
+    "换得动吗"，而不是靠"夏普不变"自我安慰。
+
+    诚实建模的三件事：
+    1. **融资不是免费的**：cash_daily 传 BIL 日收益当无风险利率代理，spread 是额外价差
+       （期货基差约 25~50bp；资本效率 ETF 费率约 100bp；零售融资券可能 150bp+）。
+    2. **每日再平衡杠杆 = 常数杠杆**，日收益乘 k 再复利天然含波动率拖累（path dependency）。
+    3. **回撤按比例放大**——直接看 max_drawdown，别只看夏普。
+
+    没建模的（用之前必须知道）：保证金追缴与被迫减仓、每日再平衡的实际成本与滑点、
+    以及"市面上没有任何产品在给我们这个组合加杠杆"——NTSX/RSST 加的是它们自己的策略。
+    """
+    return k * daily - (k - 1) * (cash_daily + spread / 252.0)
+
+
+def leverage_to_target_vol(daily: pd.Series, target_vol: float) -> float:
+    """把一条日收益序列放大到目标年化波动率所需的杠杆倍数。"""
+    vol = float(daily.std() * (252 ** 0.5))
+    return float("nan") if vol <= 0 else target_vol / vol
+
+
 def split_windows(index: pd.DatetimeIndex, n: int = 2) -> list[tuple[str, str, str]]:
     """把历史等分成 n 段（默认前后两半），返回 [(标签, 起, 止)]。"""
     if index.empty or n < 1:
