@@ -793,3 +793,65 @@ def test_canary_missing_canary_or_defense_returns_no_signals():
     p = dict(top_n=2, canary_assets=["TIP"], defense_assets=["IEF", "BIL"])
     assert strategies.build("canary_mom", p).generate(no_canary) == []
     assert strategies.build("canary_mom", p).generate(no_defense) == []
+
+
+# ── canary_mom：fast_exit（哨兵盘中转负立即调出，不等月首日）─────────────
+
+def _fast_exit_prices():
+    """构造：进攻资产稳步上涨；哨兵 TIP 前 708 天稳步上涨，随后急跌——
+    急跌落在 2024-10-01 锚点之后、2024-11-01 锚点之前，用来测「盘中触发」。"""
+    idx = pd.bdate_range("2022-01-03", periods=800)
+    n = len(idx)
+    canary = np.concatenate([np.linspace(100, 150, 708), np.linspace(150, 118, 92)])
+    return {
+        "SPY": _df(np.linspace(100, 300, n), idx),
+        "QQQ": _df(np.linspace(100, 120, n), idx),
+        "TIP": _df(canary, idx),
+        "IEF": _df(np.linspace(100, 110, n), idx),
+        "BIL": _df(np.linspace(100, 102, n), idx),
+    }
+
+
+_FAST_EXIT_PARAMS = dict(lookback_days=252, skip_days=21, top_n=1, canary_assets=["TIP"],
+                         defense_assets=["IEF", "BIL"], cash_asset="BIL", abs_momentum=False)
+
+
+def test_fast_exit_reacts_mid_month_not_at_next_anchor():
+    prices = _fast_exit_prices()
+    sigs = strategies.build("canary_mom", {**_FAST_EXIT_PARAMS, "fast_exit": True}).generate(prices)
+    emergency = [s for s in sigs if "紧急" in s.reason]
+    assert emergency, "哨兵盘中转负应触发紧急调出"
+    # 触发日必须严格晚于 2024-10-01 锚点、早于 2024-11-01 锚点（真正的"盘中"）
+    assert all("2024-10-02" <= s.date < "2024-11-01" for s in emergency)
+    sells = {s.symbol for s in emergency if s.direction == SELL}
+    buys = {s.symbol for s in emergency if s.direction == BUY}
+    assert sells == {"SPY"}                 # 唯一持仓的进攻标的被调出
+    assert buys <= {"IEF", "BIL"}            # 切入防守腿
+
+
+def test_fast_exit_false_waits_for_next_anchor():
+    prices = _fast_exit_prices()
+    sigs = strategies.build("canary_mom", {**_FAST_EXIT_PARAMS, "fast_exit": False}).generate(prices)
+    window = [s for s in sigs if "2024-10-02" <= s.date <= "2024-10-31"]
+    assert window == []                      # 默认关闭时不应有任何盘中信号
+    nov = [s for s in sigs if s.date == "2024-11-01"]
+    assert any(s.direction == SELL and s.symbol == "SPY" for s in nov)
+    assert any(s.direction == BUY and s.symbol in ("IEF", "BIL") for s in nov)
+
+
+def test_fast_exit_default_is_off_and_matches_monthly_only_signals():
+    """fast_exit 默认 False，行为必须与不传该参数时完全一致（不改变现有默认路径）。"""
+    prices = _fast_exit_prices()
+    explicit_off = strategies.build("canary_mom", {**_FAST_EXIT_PARAMS, "fast_exit": False}).generate(prices)
+    default = strategies.build("canary_mom", _FAST_EXIT_PARAMS).generate(prices)
+    key = lambda s: (s.date, s.symbol, s.direction, s.reason)
+    assert [key(s) for s in explicit_off] == [key(s) for s in default]
+
+
+def test_fast_exit_does_not_retrigger_while_already_in_defense():
+    """已经因盘中触发切入防守后，哨兵持续为负不应重复发出"紧急调出"信号。"""
+    prices = _fast_exit_prices()
+    sigs = strategies.build("canary_mom", {**_FAST_EXIT_PARAMS, "fast_exit": True}).generate(prices)
+    emergency_sells = [s for s in sigs if "紧急" in s.reason and s.direction == SELL]
+    # 只有一只进攻标的（SPY），一次触发后组合已空仓进攻腿，不应再有第二次紧急卖出
+    assert len(emergency_sells) == 1

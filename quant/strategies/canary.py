@@ -65,6 +65,45 @@ A/B 支持了「哨兵替代自指开关」这个假设：
 → 2026-07-28 起 `notify: true`：它已进入 config 的推荐模型组合 model_portfolio
   （换掉了 cross_asset_mom），推荐一个策略却不推它的信号是自相矛盾的。但请记住本平台
   只发信号不下单，而它**至今没有任何样本外记录**——收到信号 ≠ 该照做。
+
+【fast_exit 参数，2026-07-30 新增，默认 False 不改变上面任何数字】用户质疑：哨兵
+信号本来就是每日算出来的，为什么非要等到月首日才理睬？这是个好问题——现有架构把
+「多快选出该持有什么」（12-1，慢，有强证据支持）和「多快对哨兵信号做出反应」
+（本来该快）绑在了同一个月频节奏上，浪费了哨兵"早知道"的价值。
+
+fast_exit=True：哨兵盘中转负、且当前仍持有进攻仓时，**不等下个月首日，立即**清仓
+切入防守腿；哨兵转回正时的**再入场仍然只在月首日**做（非对称设计——快出、慢进，
+降低追涨杀跌式来回的风险，也是大多数尾部对冲/熔断类设计的常见做法）。选择层的
+12-1 完全不受影响。
+
+实测（进攻池仍是 cross_asset_mom 的 9 类资产，错峰口径）：
+
+  全历史        总收益  年化   回撤    波动   夏普  Calmar
+  月频（现状）    +207%  10.2%  -19.8%  10.7%  0.97  0.52
+  fast_exit      +187%   9.6%  -13.7%   9.3%  1.03  0.70
+
+  walk-forward： 2015-2020（含新冠崩盘）超额+1.3%/夏普差+0.42（月频只有+0.22）← 明显更好
+                 2020-2026              超额-0.2%/夏普差+0.07（月频+1.0%/+0.09）← 打平略输
+
+  timing luck 跨度：188bp（月频）→ **250bp（fast_exit，反而更宽）**
+  信号数：255 → 341（+34%，多出的 86 条几乎全是「紧急调出」触发，全历史共 32 次）
+  2020-02-19~04-30（新冠段）净值回撤：-19.8% → **-9.8%**（腰斩）
+
+**诚实结论——这不是无条件的提升，是不同的风险收益取舍，别当成免费升级**：
+- 全历史三项都更好看（夏普/Calmar/回撤），但**放弃了一部分绝对收益**（+207%→+187%）
+  ——本质是拿收益换更强的尾部保护，这个交易本身没有免费午餐。
+- **优势高度集中在含新冠崩盘的前半段**，后半段（2020-2026）相对公平基准的超额反而
+  转负。这符合"尾部保险"的画像（该赔付的时候赔付，平时是净成本）而不是系统性 alpha，
+  但也意味着不能像原版 canary_mom 那样宣称"两段都稳健跑赢"。
+- **timing luck 不但没降低反而变宽了**——直觉上"每天都检查"应该比"只在月首日检查"
+  对锚点选择更不敏感，但因为选择层仍是锚点依赖的，紧急调出会跟当时具体持有哪个
+  offense pick 交互，反而放大了不同锚点之间的分歧。这一点推翻了最初的直觉，必须诚实报告。
+- 32 次紧急触发里只有 1 次（2020-03-10）是教科书级别的危机；其余更像是频繁的短暂
+  避险。换手 +34% 意味着更多交易成本，也意味着人工执行这个策略需要**每天**盯哨兵
+  信号而不是每月一次——对一个只发信号不下单的平台，这是实打实的操作负担。
+→ 因此默认 `fast_exit=False`，保持原有已验证的两段稳健版本不变。是否切换由用户
+  按自己对"愿不愿意为更强的崩盘保护牺牲一部分收益、且愿意更频繁盯盘"的偏好决定，
+  这是价值判断不是纯技术判断，本文档只负责把权衡摆干净。
 """
 
 import pandas as pd
@@ -94,7 +133,8 @@ class CanaryMomentum(Strategy):
     def __init__(self, lookback_days: int = 252, skip_days: int = 21,
                  top_n: int = 3, canary_assets=("TIP",),
                  defense_assets=("IEF", "BIL"), cash_asset: str = "BIL",
-                 abs_momentum: bool = False, rebalance_offset: int = 0, **_):
+                 abs_momentum: bool = False, rebalance_offset: int = 0,
+                 fast_exit: bool = False, **_):
         self.lookback = lookback_days
         self.skip = skip_days
         self.top_n = top_n
@@ -103,6 +143,7 @@ class CanaryMomentum(Strategy):
         self.cash_asset = cash_asset
         self.abs_momentum = abs_momentum
         self.rebalance_offset = rebalance_offset  # 调仓日错峰（timing luck 检验用）
+        self.fast_exit = fast_exit  # 哨兵盘中转负是否立即调出（不必等下个月首日），见类文档
 
     def generate(self, prices: dict[str, pd.DataFrame]) -> list[Signal]:
         canary = [s for s in self.canary_assets if s in prices]
@@ -123,41 +164,58 @@ class CanaryMomentum(Strategy):
 
         signals: list[Signal] = []
         held: set[str] = set()
+        in_defense = False   # 当前持仓是否是"防守/现金"状态（fast_exit 用来判断要不要重复触发）
+        anchors = set(month_anchors(closes.index, self.rebalance_offset))
 
-        for ts in month_anchors(closes.index, self.rebalance_offset):
+        def defense_pick(ts) -> tuple[set[str], str]:
+            """哨兵转负时该切进哪只防守腿：defense_assets 里动量最高的正动量者，否则现金等价。"""
+            def_row = mom.loc[ts, defense].dropna()
+            pick = None
+            if not def_row.empty and float(def_row.max()) > 0:
+                pick = def_row.idxmax()
+            elif self.cash_asset in prices and pd.notna(closes.at[ts, self.cash_asset]):
+                pick = self.cash_asset
+            return ({pick} if pick else set()), pick
+
+        for ts in closes.index:
             can_row = fast.loc[ts, canary].dropna()
             if len(can_row) < len(canary):
-                continue                      # 哨兵窗口未满，本月不动
+                continue                      # 哨兵窗口未满，本日不动
             risk_off = bool((can_row <= 0).any())
+            is_anchor = ts in anchors
 
-            if risk_off:
+            if is_anchor:
+                if risk_off:
+                    worst = can_row.idxmin()
+                    picks, _ = defense_pick(ts)
+                    reason_buy = (f"{{sym}}：哨兵 {worst} 的 13612W 动量 "
+                                  f"{float(can_row[worst]):+.1%} 转负 → 风险关闭，切入防守腿")
+                    reason_sell = (f"{{sym}}：哨兵 {worst} 动量 {float(can_row[worst]):+.1%} 转负，"
+                                   f"风险关闭，调出进攻组合")
+                else:
+                    row = mom.loc[ts].drop(labels=[c for c in exclude if c in mom.columns],
+                                           errors="ignore").dropna()
+                    if len(row) <= self.top_n:
+                        continue
+                    ranked = row.sort_values(ascending=False)
+                    cand = list(ranked.index[:self.top_n])
+                    if self.abs_momentum:
+                        cand = [s for s in cand if ranked[s] > 0]
+                    picks = set(cand)
+                    weakest = float(can_row.min())
+                    reason_buy = (f"{{sym}}：哨兵全为正（最弱 {weakest:+.1%}）→ 风险开启，"
+                                  f"12-1 动量排名纳入组合")
+                    reason_sell = "{sym}：跌出进攻组合前{n}名，调出".format(
+                        sym="{sym}", n=self.top_n)
+            elif self.fast_exit and risk_off and not in_defense and held:
+                # 非调仓日，但哨兵盘中转负且当前持仓还是进攻仓：不等下个月首日，立即调出
                 worst = can_row.idxmin()
-                def_row = mom.loc[ts, defense].dropna()
-                pick = None
-                if not def_row.empty and float(def_row.max()) > 0:
-                    pick = def_row.idxmax()
-                elif self.cash_asset in prices and pd.notna(closes.at[ts, self.cash_asset]):
-                    pick = self.cash_asset
-                picks = {pick} if pick else set()
-                reason_buy = (f"{{sym}}：哨兵 {worst} 的 13612W 动量 "
-                              f"{float(can_row[worst]):+.1%} 转负 → 风险关闭，切入防守腿")
-                reason_sell = (f"{{sym}}：哨兵 {worst} 动量 {float(can_row[worst]):+.1%} 转负，"
-                               f"风险关闭，调出进攻组合")
+                picks, _ = defense_pick(ts)
+                reason_buy = (f"{{sym}}：哨兵 {worst} 的 13612W 动量盘中转负"
+                              f"（{float(can_row[worst]):+.1%}），紧急切入防守腿（不等月首日）")
+                reason_sell = (f"{{sym}}：哨兵 {worst} 盘中转负，紧急调出进攻组合（不等月首日）")
             else:
-                row = mom.loc[ts].drop(labels=[c for c in exclude if c in mom.columns],
-                                       errors="ignore").dropna()
-                if len(row) <= self.top_n:
-                    continue
-                ranked = row.sort_values(ascending=False)
-                cand = list(ranked.index[:self.top_n])
-                if self.abs_momentum:
-                    cand = [s for s in cand if ranked[s] > 0]
-                picks = set(cand)
-                weakest = float(can_row.min())
-                reason_buy = (f"{{sym}}：哨兵全为正（最弱 {weakest:+.1%}）→ 风险开启，"
-                              f"12-1 动量排名纳入组合")
-                reason_sell = "{sym}：跌出进攻组合前{n}名，调出".format(
-                    sym="{sym}", n=self.top_n)
+                continue
 
             for sym in sorted(held - picks):
                 if pd.notna(closes.at[ts, sym]):
@@ -169,10 +227,11 @@ class CanaryMomentum(Strategy):
                 if pd.notna(closes.at[ts, sym]):
                     val = float(mom.at[ts, sym]) if pd.notna(mom.at[ts, sym]) else 0.0
                     detail = reason_buy.format(sym=sym)
-                    if not risk_off:
+                    if is_anchor and not risk_off:
                         detail += f"（12-1 动量 {val:+.1%}）"
                     signals.append(self._sig(ts, sym, closes, BUY, detail, val))
                     held.add(sym)
+            in_defense = risk_off if is_anchor else True
 
         return signals
 
