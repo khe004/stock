@@ -271,3 +271,46 @@ def test_combined_portfolio_subset_lowers_volatility():
     combo_vol = float((10_000 * (1 + df.mean(axis=1)).cumprod()).pct_change().std())
     assert combo_vol < min(singles)
     assert m["volatility"] > 0
+
+
+# ── 回归测试：截断"价格"再回测 vs 截断"收益率序列"（2026-07-30 修复的 bug）───
+#
+# 相关性页曾经在生成信号/回测前就把 prices 截到选定区间（如"近3年"），这样低换手
+# 策略（如 aggressive_mom）若真实持仓是在区间开始前建立的，run_portfolio_backtest
+# 只按传入价格的日期范围推进——区间外的 BUY 信号被直接丢弃，也不会补开"区间起点
+# 已持有"的仓位，于是策略在窗口开头出现一段虚假的空仓期（收益率全为 0）。
+# 正确做法：永远在全量历史上回测出完整收益率序列，区间截取放在"之后"对结果做。
+
+def test_truncating_prices_before_backtest_drops_carried_over_position():
+    """复现 bug：BUY 信号在窗口开始前，若先截断 prices 再回测，窗口内会误判为空仓。"""
+    # 100 天上涨行情；信号在第 10 天买入、此后一直持有（不再卖出）
+    closes = np.linspace(100, 200, 100)
+    df = make_df(closes)
+    dates = [ts.strftime("%Y-%m-%d") for ts in df.index]
+    signals = [sig(dates[10], "A", BUY, strategy="aggressive_mom")]
+    prices_full = {"A": df}
+
+    # 错误做法：截断 prices 到最后 30 天再回测——买入信号（第10天）已在截断窗口外
+    prices_truncated = {"A": df.iloc[-30:]}
+    buggy = strategy_return_series(
+        prices=prices_truncated,
+        strategy_signals={"aggressive_mom": signals},
+        strategy_params={"aggressive_mom": {}},
+        strategy_symbols={"aggressive_mom": ["A"]},
+        cost_bps=0.0,
+    )
+    # 复现：整段全是 0（误判为空仓），但标的其实一路在涨
+    assert (buggy["aggressive_mom"] == 0.0).all()
+
+    # 正确做法：全历史回测出收益率序列，再对结果截取最后 30 天
+    correct_full = strategy_return_series(
+        prices=prices_full,
+        strategy_signals={"aggressive_mom": signals},
+        strategy_params={"aggressive_mom": {}},
+        strategy_symbols={"aggressive_mom": ["A"]},
+        cost_bps=0.0,
+    )
+    correct_window = correct_full["aggressive_mom"].tail(30)
+    # 修复后：窗口内应看到真实的上涨收益（持仓延续），不是全零
+    assert (correct_window != 0.0).any()
+    assert correct_window.sum() > 0

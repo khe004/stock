@@ -571,7 +571,7 @@ def render_correlation():
             if name == "smart_dca" and name not in signals_by_strategy:
                 signals_by_strategy[name] = []
 
-        # 加载所需价格
+        # 加载所需价格（全量历史，不在这里截断——见下方说明）
         needed: set[str] = set()
         for syms in strat_symbols.values():
             needed.update(syms)
@@ -579,15 +579,20 @@ def render_correlation():
         prices = {s: store.load_prices(conn, s) for s in needed}
         prices = {s: df for s, df in prices.items() if not df.empty}
 
-        # 区间截取
-        if range_days is not None:
-            prices = {s: df.iloc[-range_days:] for s, df in prices.items()
-                      if len(df) >= 2}
-
+        # 在全量历史上回测出完整日收益率序列，区间截取放在【之后】对 returns_df 做，
+        # 不能对 prices 做：run_portfolio_backtest 只按传入价格的日期范围推进，
+        # 窗口开始前的信号会被直接丢弃、且不会补开「区间起点已持有」的仓位——
+        # 若先截断 prices 再生成/回测，低换手策略（如 aggressive_mom/dual_momentum）
+        # 会在窗口开头出现一段虚假的空仓期（曾实测 3 年窗口下 aggressive_mom 有
+        # ~13 个月完全平线 0% 收益，而它其实一直持有仓位，只是那笔交易发生在窗口外）。
+        # 对已经算出的日收益率序列做窗口截取则没有这个问题：每天的收益本就基于
+        # 全历史下连续正确的持仓，截哪段都不会引入冷启动偏差。
         returns_df = strategy_return_series(
             prices, signals_by_strategy, strat_params, strat_symbols,
             cfg.cost_bps, trade_map,
         )
+        if range_days is not None:
+            returns_df = returns_df.tail(range_days)
 
     if returns_df.empty or returns_df.shape[1] < 2:
         st.warning("需要至少 2 个策略才能计算相关性。当前成功构建收益序列的策略不足。")
@@ -1287,6 +1292,11 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     excess_chips(strategy_total, {
         name: float(eq_.iloc[-1]) / INITIAL_CASH - 1 for name, eq_ in benchmarks.items()
     })
+    st.caption(
+        "⚠️ 以上是**单一调仓日口径**（默认月首日），未做 timing luck 修正——"
+        "月首日可能恰好是四个调仓日里最好或最差的一个，"
+        "「跑赢/跑输」的判断请以下方**🧭 稳健性检验**的错峰口径与分段对比为准。"
+    )
     risk_rows: dict[str, pd.Series] = {"策略组合": result.equity}
 
     # ── 可选：波动率缩放（风险管理） ──────────────────────────
