@@ -89,6 +89,51 @@ def classify_episode(episode: dict, tlt_ret: float | None) -> tuple[str, str]:
     return "通胀/加息型", "加息/通胀，长债 TLT 也崩，需商品/黄金对冲"
 
 
+def defense_spans(signals: list, index: pd.DatetimeIndex,
+                  defense_symbols: set[str]) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    """从策略信号重建"全仓防守"的连续区段：每日持仓非空、且完全落在 defense_symbols 内
+    （例如 canary_mom 的 {IEF, BIL}，不含哨兵 TIP——哨兵只当开关，从不被持有）。
+
+    用于把"策略这段时间在干嘛"跟"大盘这段时间有没有真的暴跌"交叉对比：
+    - 防守区段与某次大回撤重叠 → 防住了
+    - 防守区段跟任何大回撤都不重叠 → 假信号（白白空仓错过涨幅）
+    - 大回撤发生时策略没有防守区段覆盖 → 没防住
+    """
+    events: dict[str, list] = {}
+    for s in signals:
+        events.setdefault(s.date, []).append(s)
+    held: set[str] = set()
+    in_defense = []
+    for ts in index:
+        d = ts.strftime("%Y-%m-%d")
+        for s in events.get(d, []):
+            # 当日全部事件处理完才读 in_defense，同日内 sell/buy 顺序不影响最终持仓集合
+            if s.direction == "sell":
+                held.discard(s.symbol)
+            else:
+                held.add(s.symbol)
+        in_defense.append(bool(held) and held <= defense_symbols)
+
+    spans: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    start = None
+    prev = None
+    for ts, v in zip(index, in_defense):
+        if v and start is None:
+            start = ts
+        if not v and start is not None:
+            spans.append((start, prev))
+            start = None
+        prev = ts
+    if start is not None:
+        spans.append((start, index[-1]))
+    return spans
+
+
+def spans_overlap(a_start, a_end, b_start, b_end) -> bool:
+    """两个闭区间 [a_start,a_end] 与 [b_start,b_end] 是否有重叠。"""
+    return a_start <= b_end and b_start <= a_end
+
+
 def severity(maxdd: float) -> str:
     """按最大回撤给严重度标签。"""
     if maxdd <= -0.20:

@@ -472,3 +472,42 @@ def test_levered_returns_charges_financing_and_scales_drawdown():
     assert abs(k - 1.5) < 1e-9
     assert leverage_to_target_vol(pd.Series([0.0] * 10), 0.2) != leverage_to_target_vol(
         pd.Series([0.0] * 10), 0.2)   # 零波动 → NaN
+
+
+def test_defense_spans_reconstructs_contiguous_periods():
+    from quant.analysis.drawdowns import defense_spans
+    from quant.strategies.base import BUY, SELL, Signal
+    idx = pd.bdate_range("2022-01-03", periods=40)
+
+    def sig(date, symbol, direction):
+        return Signal(date=date, symbol=symbol, strategy="canary_mom",
+                     direction=direction, price=100.0, strength=0.5, reason="test")
+
+    d = [ts.strftime("%Y-%m-%d") for ts in idx]
+    signals = [
+        sig(d[5], "IEF", BUY),          # 第5天起进入防守
+        sig(d[15], "IEF", SELL),
+        sig(d[15], "SPY", BUY),         # 第15天起切回进攻（不算防守）
+        sig(d[25], "SPY", SELL),
+        sig(d[25], "BIL", BUY),         # 第25天起再次防守，直到序列末尾
+    ]
+    spans = defense_spans(signals, idx, {"IEF", "BIL"})
+    assert spans == [(idx[5], idx[14]), (idx[25], idx[-1])]
+
+
+def test_defense_spans_empty_when_never_in_defense():
+    from quant.analysis.drawdowns import defense_spans
+    from quant.strategies.base import BUY, Signal
+    idx = pd.bdate_range("2022-01-03", periods=20)
+    sig = Signal(date=idx[2].strftime("%Y-%m-%d"), symbol="SPY", strategy="x",
+                direction=BUY, price=100.0, strength=0.5, reason="t")
+    assert defense_spans([sig], idx, {"IEF", "BIL"}) == []
+
+
+def test_spans_overlap():
+    from quant.analysis.drawdowns import spans_overlap
+    a0, a1 = pd.Timestamp("2020-01-01"), pd.Timestamp("2020-01-31")
+    assert spans_overlap(a0, a1, pd.Timestamp("2020-01-15"), pd.Timestamp("2020-02-15"))  # 部分重叠
+    assert spans_overlap(a0, a1, pd.Timestamp("2019-12-01"), pd.Timestamp("2020-01-05"))  # 部分重叠
+    assert spans_overlap(a0, a1, a0, a1)                                                  # 完全重合
+    assert not spans_overlap(a0, a1, pd.Timestamp("2020-02-01"), pd.Timestamp("2020-02-28"))  # 无重叠
