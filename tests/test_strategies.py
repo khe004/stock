@@ -919,3 +919,32 @@ def test_risk_off_threshold_shifts_trigger_point():
                          if s.direction == BUY and s.symbol in ("IEF", "BIL")}
     assert shallow_defense_buys        # 阈值=0 时温和下行足以触发防守
     assert not deep_defense_buys       # 阈值=-50% 时同样的温和下行不该触发
+
+
+# ── selectors.py：抽出来的共享选择信号纯函数 ─────────────────────────
+
+def test_momentum_return_matches_manual_shift_divide():
+    from quant.strategies.selectors import momentum_return
+    df = make_df(np.linspace(100, 200, 300))
+    result = momentum_return(df["close"].to_frame("A"), lookback=252, skip=21)
+    expected = df["close"].shift(21) / df["close"].shift(252) - 1
+    pd.testing.assert_series_equal(result["A"], expected, check_names=False)
+
+
+def test_momentum_return_skip0_equals_pct_change():
+    """dual_momentum 原先用 .pct_change(lookback)；skip=0 时两者必须数学等价。"""
+    from quant.strategies.selectors import momentum_return
+    s = pd.Series(np.linspace(100, 300, 400) + np.sin(np.arange(400)) * 5)
+    via_selector = momentum_return(s.to_frame("A"), lookback=90, skip=0)["A"]
+    via_pct_change = s.pct_change(90, fill_method=None)
+    pd.testing.assert_series_equal(via_selector, via_pct_change, check_names=False)
+
+
+def test_momentum_strength_bounds_and_scale():
+    from quant.strategies.selectors import momentum_strength
+    assert momentum_strength(0.0) == 0.1                    # 下限
+    assert momentum_strength(1.0) == 1.0                     # 上限封顶（|1.0|*2=2 → clip到1.0）
+    assert momentum_strength(0.25) == 0.5                    # 中间值：0.25*2=0.5
+    assert momentum_strength(-0.25) == 0.5                   # 取绝对值，方向不影响强度
+    assert momentum_strength(0.05, scale=2.0) == pytest.approx(0.1)  # 5%*2=0.1，恰好下限
+    assert momentum_strength(0.5, scale=1.0) == 0.5           # 自定义 scale

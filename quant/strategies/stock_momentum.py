@@ -13,6 +13,7 @@ import yaml
 from quant.config import ROOT
 from quant.strategies.base import (BUY, SELL, Signal, Strategy,
                                   month_anchors, price_series)
+from quant.strategies.selectors import momentum_return, momentum_strength
 
 
 class StockMomentum(Strategy):
@@ -71,7 +72,7 @@ class StockMomentum(Strategy):
             return []
         adj = pd.DataFrame({s: price_series(prices[s]) for s in uni}).sort_index()
         # 12-1 动量：t-skip 相对 t-lookback 的收益
-        mom = adj.shift(self.skip) / adj.shift(self.lookback) - 1
+        mom = momentum_return(adj, self.lookback, self.skip)
         spy = price_series(prices[self.regime_symbol])
         regime = (spy > spy.rolling(self.regime_ma).mean()).reindex(adj.index).ffill()
         pools = self.monthly_pools(prices)
@@ -136,7 +137,7 @@ class StockMomentum(Strategy):
             else:
                 rank, ret = picks[sym]
                 reason = f"{sym}：12-1 动量 {ret:+.1%}，流动性池内第 {rank} 名，入选前 {self.top_n}"
-                strength = min(1.0, max(0.1, abs(ret) * 2))
+                strength = momentum_strength(ret)
             signals.append(self._sig(prices, ts, sym, BUY, reason, strength))
 
     def _sig(self, prices, ts, sym, direction, reason, strength) -> Signal:

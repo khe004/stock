@@ -20,7 +20,12 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 - `quant/config.py`：config.yaml + .env；`update_symbols` = watchlist + 各策略 universe_file
 - `quant/data/`：yfinance 增量拉取（首拉空表报错）、SQLite（prices/signals 两表）
 - `quant/strategies/`：基类 `generate(prices: dict[symbol, df]) -> list[Signal]`，对**全量历史**出信号；
-  每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY
+  每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY。`selectors.py`（2026-07-30
+  抽出）收敛了 6 个策略里各自独立抄写的 12-1 动量公式与强度映射（`momentum_return`/
+  `momentum_strength`，纯函数，逐策略字节级回归验证过）——**只抽了"选择信号"这一半**，
+  "避险机制"刻意没抽成共享对象：每个策略的 SELL/BUY reason 文案都是手写定制的（产品要求
+  reason 必须是人话），强行统一要么牺牲文案质量、要么共享类沦为一堆策略专属回调，两种都不值。
+  详见 selectors.py 文档头与 memory: stock-backlog
 - `quant/backtest/engine.py`：单标的、组合轮动（同日先卖后买、资金不出场）、智能定投三种模拟；
   `vol_scaled_equity` 纯函数（无杠杆波动率缩放，降回撤/尾部，实测不提升夏普；仅分析用不改实盘信号）
 - `quant/analysis/`：robustness.py（**稳健性检验**：调仓日 timing luck 散布 + 错峰 tranching +

@@ -24,6 +24,7 @@ import pandas as pd
 
 from quant.strategies.base import (BUY, SELL, Signal, Strategy,
                                   month_anchors, price_series)
+from quant.strategies.selectors import momentum_return, momentum_strength
 
 
 class DualMomentum(Strategy):
@@ -49,9 +50,8 @@ class DualMomentum(Strategy):
         closes = pd.DataFrame(
             {s: prices[s]["close"] for s in cols}
         ).sort_index()
-        rets = pd.DataFrame(
-            {s: price_series(prices[s]) for s in cols}
-        ).sort_index().pct_change(self.lookback, fill_method=None)
+        adj = pd.DataFrame({s: price_series(prices[s]) for s in cols}).sort_index()
+        rets = momentum_return(adj, self.lookback)  # skip=0：近 lookback 日收益，无跳过
         # 月度调仓日：每月第 (rebalance_offset+1) 个交易日（默认月首日）
         month_firsts = month_anchors(closes.index, self.rebalance_offset)
 
@@ -109,5 +109,5 @@ class DualMomentum(Strategy):
         return Signal(
             date=ts.strftime("%Y-%m-%d"), symbol=symbol, strategy=self.name,
             direction=direction, price=round(float(closes.at[ts, symbol]), 2),
-            strength=round(min(1.0, max(0.1, abs(best_ret) * 2)), 2), reason=reason,
+            strength=round(momentum_strength(best_ret), 2), reason=reason,
         )

@@ -146,6 +146,7 @@ import pandas as pd
 
 from quant.strategies.base import (BUY, SELL, Signal, Strategy,
                                    month_anchors, price_series)
+from quant.strategies.selectors import momentum_return, momentum_strength
 
 # 13612W 的四段回看（交易日）与年化权重：1/3/6/12 个月
 _SPANS = ((21, 12.0), (63, 4.0), (126, 2.0), (252, 1.0))
@@ -196,7 +197,7 @@ class CanaryMomentum(Strategy):
         closes = pd.DataFrame({s: df["close"] for s, df in prices.items()}).sort_index()
         adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
         # 选择层：12-1（慢）。触发层：13612W（快）
-        mom = adj.shift(self.skip) / adj.shift(self.lookback) - 1
+        mom = momentum_return(adj, self.lookback, self.skip)
         fast = momentum_13612w(adj)
 
         signals: list[Signal] = []
@@ -279,6 +280,6 @@ class CanaryMomentum(Strategy):
             strategy=self.name,
             direction=direction,
             price=round(float(closes.at[ts, symbol]), 2),
-            strength=round(min(1.0, max(0.1, abs(mom_val) * 2)), 2),
+            strength=round(momentum_strength(mom_val), 2),
             reason=reason,
         )

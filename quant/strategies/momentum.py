@@ -9,6 +9,7 @@ import pandas as pd
 
 from quant.strategies.base import (BUY, SELL, Signal, Strategy,
                                   month_anchors, price_series)
+from quant.strategies.selectors import momentum_return, momentum_strength
 
 
 class Momentum(Strategy):
@@ -28,8 +29,8 @@ class Momentum(Strategy):
         closes = pd.DataFrame({s: df["close"] for s, df in prices.items()}).sort_index()
         adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
 
-        # 12-1 动量：t-skip 相对 t-lookback 的收益（参考 stock_momentum 的 mom 计算）
-        mom = adj.shift(self.skip) / adj.shift(self.lookback) - 1
+        # 12-1 动量：t-skip 相对 t-lookback 的收益
+        mom = momentum_return(adj, self.lookback, self.skip)
 
         # 月度调仓日：每月第 (rebalance_offset+1) 个交易日（默认月首日）
         month_firsts = month_anchors(closes.index, self.rebalance_offset)
@@ -73,19 +74,13 @@ class Momentum(Strategy):
         return signals
 
     def _sig(self, ts, symbol, closes, mom, direction, reason, mom_val) -> Signal:
-        """构造 Signal，strength 用动量值映射到 0~1。
-
-        映射逻辑：min(1.0, max(0.1, abs(mom_val) * 2))
-        - 动量 ±50% 以上 → strength 1.0
-        - 动量 ±5%      → strength 0.1
-        参考 stock_momentum 的 strength 映射。
-        """
+        """构造 Signal，strength 用动量值映射到 0~1（见 selectors.momentum_strength）。"""
         return Signal(
             date=ts.strftime("%Y-%m-%d"),
             symbol=symbol,
             strategy=self.name,
             direction=direction,
             price=round(float(closes.at[ts, symbol]), 2),
-            strength=round(min(1.0, max(0.1, abs(mom_val) * 2)), 2),
+            strength=round(momentum_strength(mom_val), 2),
             reason=reason,
         )
