@@ -948,3 +948,66 @@ def test_momentum_strength_bounds_and_scale():
     assert momentum_strength(-0.25) == 0.5                   # 取绝对值，方向不影响强度
     assert momentum_strength(0.05, scale=2.0) == pytest.approx(0.1)  # 5%*2=0.1，恰好下限
     assert momentum_strength(0.5, scale=1.0) == 0.5           # 自定义 scale
+
+
+# ── momentum：简单避险实验（abs_momentum / cash_asset，2026-07-30，默认关闭）────
+
+def _sector_hedge_prices():
+    """构造：A 一直涨（稳居第一）、C 一直跌（稳居末位不会被 top2 选中）、
+    B 先涨后跌（12-1 动量在样本中段从正转负，但排名一直在 A/C 之间，不会掉出 top2）。"""
+    idx = pd.bdate_range("2022-01-03", periods=500)
+    n = len(idx)
+    return idx, {
+        "A": make_df(np.linspace(100, 300, n)),
+        "B": make_df(np.concatenate([np.linspace(100, 200, 300), np.linspace(200, 120, n - 300)])),
+        "C": make_df(np.linspace(100, 40, n)),
+    }
+
+
+def test_abs_momentum_default_off_holds_through_sign_flip():
+    _, prices = _sector_hedge_prices()
+    sigs = Momentum(lookback_days=252, skip_days=21, top_n=2).generate(prices)
+    # 默认不过滤：B 排名一直是第二，动量转负也不该被卖出
+    assert not any(s.symbol == "B" and s.direction == SELL for s in sigs)
+
+
+def test_abs_momentum_true_sells_on_sign_flip_even_if_still_ranked_in_top_n():
+    _, prices = _sector_hedge_prices()
+    sigs = Momentum(lookback_days=252, skip_days=21, top_n=2, abs_momentum=True).generate(prices)
+    sells = [s for s in sigs if s.symbol == "B" and s.direction == SELL]
+    assert len(sells) == 1
+    assert "绝对动量开关触发" in sells[0].reason
+
+
+def test_abs_momentum_with_cash_asset_fills_freed_slot():
+    idx = pd.bdate_range("2022-01-03", periods=500)
+    n = len(idx)
+    bil = make_df(np.linspace(100, 105, n))
+
+    _, prices = _sector_hedge_prices()
+    prices["BIL"] = bil
+    params = dict(lookback_days=252, skip_days=21, top_n=2,
+                  abs_momentum=True, cash_asset="BIL")
+    sigs = Momentum(**params).generate(prices)
+    bil_buys = [s for s in sigs if s.symbol == "BIL" and s.direction == BUY]
+    assert bil_buys and "空缺名额切现金等价" in bil_buys[0].reason
+
+    # 没有 cash_asset 时（即便 BIL 恰好在价格池里）不该走现金兜底那条 reason 文案，
+    # 用独立的价格字典对照，避免跟上面那次调用共享可变状态
+    _, prices2 = _sector_hedge_prices()
+    prices2["BIL"] = bil
+    sigs_no_cash = Momentum(lookback_days=252, skip_days=21, top_n=2,
+                            abs_momentum=True).generate(prices2)
+    assert not any(s.symbol == "BIL" and "空缺名额切现金等价" in s.reason
+                  for s in sigs_no_cash)
+
+
+def test_momentum_default_params_unaffected_by_new_kwargs():
+    """abs_momentum/cash_asset 是新增的可选参数，不传时策略行为必须与之前完全一致
+    （已在 scratchpad 用真实历史数据逐字节验证；这里只做合成数据下的轻量哨兵）。"""
+    _, prices = _sector_hedge_prices()
+    default = Momentum(lookback_days=252, skip_days=21, top_n=2).generate(prices)
+    explicit = Momentum(lookback_days=252, skip_days=21, top_n=2,
+                        abs_momentum=False, cash_asset=None).generate(prices)
+    key = lambda s: (s.date, s.symbol, s.direction, s.reason)
+    assert [key(s) for s in default] == [key(s) for s in explicit]
