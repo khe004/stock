@@ -62,12 +62,22 @@ class Config:
 
     @property
     def model_portfolio(self) -> list[str]:
-        """推荐模型组合的成分策略（相关性页「🧺 模型组合」的默认勾选）。
+        """推荐模型组合的全部成分（相关性页「🧺 模型组合」的默认勾选）。
 
         显式写进 config 而不是藏在面板代码里——这是一个有实测依据、会随结论变的决定，
         应该像策略参数一样被版本化、可追溯。空/缺省时面板回落到"全部会推送的策略"。
+
+        成分分两类：`strategies`（本平台的策略名）+ `hold_assets`（买入持有的 ETF，
+        不是策略、没有信号，作为一条独立收益腿参与组合，如管理期货 DBMF）。返回二者合并。
         """
-        return list(self.raw.get("model_portfolio", {}).get("strategies", []))
+        mp = self.raw.get("model_portfolio", {})
+        return list(mp.get("strategies", [])) + list(mp.get("hold_assets", []))
+
+    @property
+    def model_portfolio_hold_assets(self) -> list[str]:
+        """模型组合里的买入持有成分（ETF 代码），需在相关性页把它们的日收益率
+        作为独立列接进 returns_df 才能被组合识别。"""
+        return list(self.raw.get("model_portfolio", {}).get("hold_assets", []))
 
     def universe_symbols(self, filename: str) -> list[str]:
         """读取按行业分组的候选超集文件，返回全部代码（去重保序）。"""

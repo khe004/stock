@@ -432,19 +432,25 @@ def test_timing_luck_sweep_reports_spread_and_tranche():
 
 
 def test_config_model_portfolio_is_explicit_and_consistent():
-    """推荐配方必须显式配在 config，且成分都是启用中的策略。"""
+    """推荐配方必须显式配在 config；策略成分须是启用中且会推送的策略，
+    买入持有成分（hold_assets）是 ETF 代码、不必是策略。"""
     from quant.config import load_config
     cfg = load_config()
     mp = cfg.model_portfolio
-    assert mp, "config 应显式配置 model_portfolio.strategies"
-    enabled = {name for name, _ in cfg.enabled_strategies()}
-    assert set(mp) <= enabled, f"推荐配方含未启用策略：{set(mp) - enabled}"
+    assert mp, "config 应显式配置 model_portfolio"
     assert len(set(mp)) == len(mp), "推荐配方有重复成分"
     assert len(mp) >= 2, "组合至少要 2 个成分才谈得上分散"
-    # 推荐的成分必须会推送信号——推荐一个策略却不推它的信号是自相矛盾的
+
+    hold = set(cfg.model_portfolio_hold_assets)
+    strat_names = [s for s in mp if s not in hold]         # 策略成分 = 全部减去买入持有
     params = dict(cfg.enabled_strategies())
-    silent = [s for s in mp if not params[s].get("notify", True)]
-    assert not silent, f"推荐配方成分未开启推送：{silent}"
+    enabled = set(params)
+    # 策略成分必须是启用中的策略，且会推送信号（推荐却不推是自相矛盾）
+    assert set(strat_names) <= enabled, f"推荐配方含未启用策略：{set(strat_names) - enabled}"
+    silent = [s for s in strat_names if not params[s].get("notify", True)]
+    assert not silent, f"推荐配方策略成分未开启推送：{silent}"
+    # 买入持有成分不应同时是策略名（避免语义歧义）
+    assert not (hold & enabled), f"hold_assets 与策略名冲突：{hold & enabled}"
 
 
 def test_levered_returns_charges_financing_and_scales_drawdown():

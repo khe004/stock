@@ -824,36 +824,57 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
         "注意 canary_mom 目前是 notify:false 仅观察，尚无样本外记录。"
     )
 
+    # 买入持有型成分（如管理期货 DBMF）：不是策略、没有信号，作为独立收益腿并进来。
+    # 只在本小节的局部 frame `ext` 里生效，不碰页面全局 aligned（否则 DBMF 的短历史
+    # 会 dropna 掉整页 2019 之前的数据，污染上面的热力图/诊断表——这是之前修过的坑）。
+    ext = aligned.copy()
+    for sym in cfg.model_portfolio_hold_assets:
+        hdf = store.load_prices(conn, sym)
+        if not hdf.empty:
+            ext[sym] = price_series(hdf).pct_change(fill_method=None).reindex(ext.index)
+    # 组合层用的相关矩阵：含 DBMF 时按"共同窗口"（DBMF 有数据起）重算，其余情况与全局一致
+    ext_corr = ext.dropna().corr() if len(ext.columns) > len(aligned.columns) else corr
+
     enabled = dict(cfg.enabled_strategies())
-    # 默认成分 = config 里显式配置的推荐配方（model_portfolio.strategies）；
+    # 默认成分 = config 里显式配置的推荐配方（strategies + hold_assets）；
     # 没配或成分不在当前收益序列里时，回落到"会推送的实盘候选"
     # （notify:false 的仅观察策略与已定性"不作实盘仓位"的 stock_momentum 除外）
     live = [c for c in aligned.columns
             if enabled.get(c, {}).get("notify", True) and c != "stock_momentum"]
-    recommended = [c for c in cfg.model_portfolio if c in aligned.columns]
-    default = recommended or live or list(aligned.columns)
+    recommended = [c for c in cfg.model_portfolio if c in ext.columns]
+    default = recommended or live or list(ext.columns)
     if "mp_pick" not in st.session_state:
         st.session_state["mp_pick"] = default
 
     c1, c2 = st.columns([3, 1])
     with c2:
-        n_sug = st.number_input("推荐个数", 2, max(2, len(aligned.columns)), 4, key="mp_n")
+        n_sug = st.number_input("推荐个数", 2, max(2, len(ext.columns)), 4, key="mp_n")
         if st.button("推荐低相关组合", key="mp_suggest"):
-            # 只从实盘候选里挑——推荐里混进 vix_regime 这类仅观察策略是误导
-            st.session_state["mp_pick"] = suggest_low_corr_set(corr, int(n_sug), default)
+            # 只从实盘候选/推荐成分里挑——推荐里混进 vix_regime 这类仅观察策略是误导
+            st.session_state["mp_pick"] = suggest_low_corr_set(ext_corr, int(n_sug), default)
     label = ("组合成分（默认=config 的 model_portfolio 推荐配方）" if recommended
              else "组合成分（默认=会推送的实盘候选，已排除仅观察策略）")
     with c1:
-        picked = st.multiselect(label, options=list(aligned.columns), key="mp_pick")
+        picked = st.multiselect(label, options=list(ext.columns), key="mp_pick")
     if len(picked) < 2:
         st.info("至少选 2 个策略才能构成组合。")
         return
 
-    sub = aligned[picked]
+    # dropna over 选中列：含 DBMF 这类短历史成分时，窗口自动收窄到共同区间；
+    # 不含时保持全历史。所有下游（组合、逐成分、分段）都基于这个共同窗口，口径一致。
+    sub = ext[picked].dropna()
     combo_eq, combo_m = combined_portfolio(sub)
     if combo_eq.empty:
         st.warning("无法构建组合")
         return
+
+    hold_picked = [c for c in picked if c in cfg.model_portfolio_hold_assets]
+    if hold_picked and not sub.empty and len(sub) < len(aligned):
+        st.caption(
+            f"⚠️ 含买入持有成分 {('、'.join(hold_picked))}（历史较短），组合窗口已收窄到"
+            f"**共同区间 {sub.index[0]:%Y-%m-%d} ~ {sub.index[-1]:%Y-%m-%d}**（{len(sub)} 天）——"
+            "下面所有数字都是这段公共窗口内算的，不是全历史，跨配方比较时注意口径。"
+        )
 
     rows: dict[str, dict] = {"🧺 模型组合": combo_m}
     for c in picked:
@@ -877,7 +898,7 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
              "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}),
         width="stretch")
 
-    avg_c = average_pairwise_corr(corr, picked)
+    avg_c = average_pairwise_corr(ext_corr, picked)
     worst_dd = min(rows[c]["max_drawdown"] for c in picked)     # 回撤是负数，min = 最深
     st.caption(
         f"成分平均两两相关 **{avg_c:.2f}**（越低越好；>0.5 说明成分在做同一件事，组合是假分散）。"
@@ -887,9 +908,10 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
         "1. **组合夏普高于每个成分，很大一部分是分散的数学结果，不是 alpha。** "
         "把不完全相关的序列平均，波动降得比收益快，夏普自然上去——这是真实可得的好处，"
         "但别把它读成「我们找到了更好的策略」。\n"
-        "2. **成分沿用各自默认的月首日调仓**，而 dual_momentum / cross_asset_mom 的月首日恰好是"
+        "2. **策略成分沿用各自默认的月首日调仓**，而 dual_momentum / cross_asset_mom 的月首日恰好是"
         "四个调仓日里最好的那个（见回测页稳健性检验），所以组合数字也继承了这份 timing luck。"
-        "「推荐低相关组合」也是拿全历史相关矩阵挑的，属于轻度 in-sample 选择。"
+        "「推荐低相关组合」也是拿相关矩阵挑的，属于轻度 in-sample 选择。"
+        "（买入持有成分如 DBMF 无调仓，不涉及 timing luck，但样本历史更短——见上方窗口提示。）"
     )
 
     # ── 分段：组合的名次稳不稳 ─────────────────────────
