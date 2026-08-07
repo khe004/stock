@@ -115,6 +115,78 @@ def _is_positive(v) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 币种映射与多币种市值换算
+# ---------------------------------------------------------------------------
+
+# 交易所后缀 → 币种（兜底推断；优先用 fundamentals.raw_json 里的 currency）
+SUFFIX_TO_CURRENCY: dict[str, str] = {
+    ".KS": "KRW",
+    ".KQ": "KRW",
+    ".T": "JPY",
+    ".TW": "TWD",
+    ".TWO": "TWD",
+    ".SZ": "CNY",
+    ".SS": "CNY",
+    ".HK": "HKD",
+}
+
+
+def infer_currency(symbol: str) -> str:
+    """根据交易所后缀推断币种。无后缀或未知后缀默认 USD。"""
+    for suffix, ccy in SUFFIX_TO_CURRENCY.items():
+        if symbol.endswith(suffix):
+            return ccy
+    return "USD"
+
+
+def get_currency_for_symbol(
+    symbol: str,
+    raw_json: dict | None = None,
+) -> str:
+    """获取标的的交易币种。
+
+    优先从 fundamentals 的 raw_json 里取 'currency' 字段（零成本、最准确），
+    兜底按交易所后缀推断。
+    """
+    if raw_json and isinstance(raw_json, dict):
+        ccy = raw_json.get("currency")
+        if ccy and isinstance(ccy, str):
+            return ccy.upper()
+    return infer_currency(symbol)
+
+
+def to_usd_market_cap(
+    market_caps: dict[str, float | None],
+    currencies: dict[str, str],
+    fx_rates: dict[str, float],
+) -> dict[str, float | None]:
+    """本币市值 → 美元市值。
+
+    currencies: symbol → 币种代码（如 'KRW', 'JPY', 'USD'）。
+    fx_rates:   币种代码 → 1 USD 兑多少本币（如 KRW=1419 表示 1美元=1419韩元）。
+
+    USD 标的直接返回原值；非 USD 标的做 市值_USD = 市值_本币 / 汇率。
+    **缺汇率的返回 None**（不 fallback 成原值——那等于把韩元当美元，是灾难性错误）。
+    """
+    result: dict[str, float | None] = {}
+    for symbol, cap in market_caps.items():
+        if cap is None:
+            result[symbol] = None
+            continue
+        ccy = currencies.get(symbol, "USD")
+        if ccy == "USD":
+            result[symbol] = cap
+        else:
+            rate = fx_rates.get(ccy)
+            if rate is not None and rate > 0:
+                result[symbol] = cap / rate
+            else:
+                # 缺汇率 → None，宁可显示"—"也不能把万亿韩元当万亿美元
+                result[symbol] = None
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 2.2 赛道统治力（市值份额）
 # ---------------------------------------------------------------------------
 

@@ -2,12 +2,12 @@
 # 同一只股票可出现在多个赛道（如 AVGO 既做算力也做网络芯片）
 # 赛道归属是主观判断，人工维护；JNPR 已退市（被 HPE 收购）剔除
 算力芯片:      [NVDA, AMD, AVGO, MRVL, INTC, QCOM, TXN]
-存储:          [MU, WDC, STX, SNDK]
-半导体设备:    [AMAT, LRCX, KLAC, TER, ASML, ENTG]
+存储:          [MU, WDC, STX, SNDK, "005930.KS", "000660.KS"]
+半导体设备:    [AMAT, LRCX, KLAC, TER, ASML, ENTG, 8035.T, 6857.T]
 EDA与IP:       [SNPS, CDNS, ARM]
 网络交换:      [ANET, CSCO, FFIV]
-光模块光通信:  [COHR, LITE, FN, GLW]
-服务器与散热:  [SMCI, DELL, HPE, VRT, JCI, TT, CARR]
+光模块光通信:  [COHR, LITE, FN, GLW, 300308.SZ]
+服务器与散热:  [SMCI, DELL, HPE, VRT, JCI, TT, CARR, 2317.TW]
 电力:          [CEG, VST, NRG, D, SO, DUK, AEP, ETR, NEE, PCG, EXC, XEL, PEG]
 数据中心REIT:  [EQIX, DLR, AMT, IRM]
 云与超大规模:  [MSFT, GOOGL, AMZN, META, ORCL, IBM, NOW]

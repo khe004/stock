@@ -79,6 +79,17 @@ watchlist:
     - SNDK
     - TSM
     - VRT
+    - "005930.KS"         # 三星电子（KRW）
+    - "000660.KS"         # SK海力士（KRW）
+    - 300308.SZ           # 中际旭创（CNY）
+    - 8035.T              # 东京电子（JPY）
+    - 6857.T              # 爱德万测试（JPY）
+    - 2317.TW             # 鸿海/富士康（TWD）
+  fx_rates:             # 汇率（AI 基建页把非美标的市值换算成美元用；不喂给任何策略）
+    - KRW=X
+    - JPY=X
+    - TWD=X
+    - CNY=X
   aggressive_growth:    # 进攻档宇宙：成长/科技 ETF（进攻）+ TLT（避险）
     - QQQ               # 纳指100
     - XLK               # 科技

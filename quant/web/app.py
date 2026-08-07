@@ -1,5 +1,6 @@
 """Streamlit 复盘面板：streamlit run quant/web/app.py"""
 
+import json
 import sys
 from pathlib import Path
 
@@ -2405,6 +2406,8 @@ def render_ai_infra():
         compute_growth_metrics,
         compute_lane_market_share,
         compute_lane_summary,
+        get_currency_for_symbol,
+        to_usd_market_cap,
     )
     from quant.strategies.selectors import momentum_return
 
@@ -2421,7 +2424,12 @@ def render_ai_infra():
         "同比，最新但单季波动大、易被低基数放大（如 MU 存储周期反转后 +346%）；"
         "「营收CAGR」「毛利率」「净利率」来自**年度利润表**，更平滑但**滞后 6~12 个月**"
         "（最新财年早已结束，MU 的年报同比只有 +49%）。赛道概览的「营收增长中位数」用季度口径，"
-        "与股价涨幅的时效对齐。"
+        "与股价涨幅的时效对齐。\n\n"
+        "🌏 **含非美龙头**（三星/SK海力士/中际旭创/东京电子/爱德万/鸿海等）："
+        "它们的**市值已按最新汇率换算成美元**才参与统治力与合计市值计算（否则把万亿韩元与"
+        "十亿美元相加是垃圾数字）；但**涨幅与 12-1 动量是本币计价收益**，与美元收益差一个"
+        "汇率变动——「币种」列标出了各标的的计价货币。比率类指标（PE/毛利率/净利率/营收同比）"
+        "无量纲，不涉及换算。"
         "赛道近 1 年涨幅用**市值加权**（不是等权——等权会让一只小盘股的暴涨绑架整条赛道的读数）；"
         "赛道营收增长用**中位数**（不用均值，避免 NVDA +100% 这种极值绑架）。",
         icon="ℹ️",
@@ -2457,14 +2465,40 @@ def render_ai_infra():
         latest_fund = (fdf.sort_values("date").groupby("symbol").last()
                        if not fdf.empty else pd.DataFrame())
 
-        # 市值字典
-        market_caps: dict[str, float | None] = {}
+        # 市值字典（**本币**，下面统一换算成美元）
+        market_caps_local: dict[str, float | None] = {}
         for s in all_syms:
             if not latest_fund.empty and s in latest_fund.index:
                 mc = latest_fund.at[s, "market_cap"] if "market_cap" in latest_fund.columns else None
-                market_caps[s] = float(mc) if mc is not None and pd.notna(mc) else None
+                market_caps_local[s] = float(mc) if mc is not None and pd.notna(mc) else None
             else:
-                market_caps[s] = None
+                market_caps_local[s] = None
+
+        # 币种：优先取 fundamentals.raw_json 的 currency，兜底按交易所后缀推断
+        currencies: dict[str, str] = {}
+        for s in all_syms:
+            raw = None
+            if not latest_fund.empty and s in latest_fund.index and "raw_json" in latest_fund.columns:
+                rj = latest_fund.at[s, "raw_json"]
+                if isinstance(rj, str) and rj:
+                    try:
+                        raw = json.loads(rj)
+                    except (ValueError, TypeError):
+                        raw = None
+            currencies[s] = get_currency_for_symbol(s, raw)
+
+        # 汇率：prices 表里的 `XXX=X`（1 USD 兑多少本币），取最新收盘
+        fx_rates: dict[str, float] = {}
+        for ccy in sorted({c for c in currencies.values() if c != "USD"}):
+            fx_df = store.load_prices(conn, f"{ccy}=X")
+            if not fx_df.empty:
+                v = fx_df["close"].dropna()
+                if not v.empty and float(v.iloc[-1]) > 0:
+                    fx_rates[ccy] = float(v.iloc[-1])
+
+        # **统一换算成美元**——不换算就把万亿韩元和十亿美元加在一起求份额，那是垃圾数字。
+        # 缺汇率的标的市值返回 None（宁可显示"—"，也不能把本币当美元混进分母）。
+        market_caps = to_usd_market_cap(market_caps_local, currencies, fx_rates)
 
         # 财报
         fin_df = store.load_financials(conn)
@@ -2602,6 +2636,7 @@ def render_ai_infra():
                     fpe = float(_v)
             detail_rows.append({
                 "代码": s,
+                "币种": currencies.get(s, "USD"),
                 "市值份额": shares.get(s),
                 "市值": mc,
                 "营收CAGR": gm.revenue_cagr if gm else None,
