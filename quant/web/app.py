@@ -2521,7 +2521,8 @@ def render_ai_infra():
     lane_summaries = []
     for lane_name, lane_syms in lanes.items():
         summary = compute_lane_summary(lane_name, lane_syms, market_caps,
-                                        growth_metrics, returns_1y, mom_dict)
+                                        growth_metrics, returns_1y,
+                                        momentum=mom_dict)
         lane_summaries.append(summary)
 
     overview_df = pd.DataFrame(lane_summaries)
