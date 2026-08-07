@@ -147,20 +147,36 @@ def compute_lane_market_share(
 # 2.3 赛道汇总
 # ---------------------------------------------------------------------------
 
+def _weighted_by_cap(valid_caps: dict[str, float],
+                     values: dict[str, float | None]) -> float | None:
+    """按市值加权求均值，跳过取值缺失的成分（其市值一并不计入分母）。"""
+    w_sum = 0.0
+    cap_sum = 0.0
+    for s, cap in valid_caps.items():
+        v = values.get(s)
+        if v is not None and not _is_nan(v):
+            w_sum += cap * v
+            cap_sum += cap
+    return w_sum / cap_sum if cap_sum > 0 else None
+
+
 def compute_lane_summary(
     lane_name: str,
     lane_symbols: list[str],
     market_caps: dict[str, float | None],
     growth_metrics: dict[str, GrowthMetrics],
     returns_1y: dict[str, float | None],
+    momentum: dict[str, float | None] | None = None,
 ) -> dict:
     """计算单条赛道的汇总数据。
 
-    returns_1y: symbol -> 近 1 年涨幅（小数）。
-    returns_1y 用于市值加权赛道涨幅。
+    returns_1y: symbol -> 近 1 年涨幅（小数），用于市值加权赛道涨幅。
+    momentum:   symbol -> 12-1 动量（小数），同样市值加权——与近1年涨幅同口径，
+                便于横向对比"已经涨完的"（近1年）与"当前动量强弱"（12-1，跳过最近1个月）。
+                传 None 时不输出该列（向后兼容）。
 
-    返回 dict：{lane, n_symbols, total_market_cap, weighted_return_1y,
-                median_revenue_growth}
+    返回 dict：{赛道, 成分数, 合计市值, 近1年涨幅(市值加权), 12-1动量(市值加权),
+                营收增长中位数}
     """
     # 成分数
     n = len(lane_symbols)
@@ -171,18 +187,13 @@ def compute_lane_summary(
                   and _is_positive(market_caps[s])}
     total_cap = sum(valid_caps.values()) if valid_caps else None
 
-    # 赛道近 1 年涨幅（市值加权）
+    # 赛道近 1 年涨幅 / 12-1 动量（均为市值加权，同口径）
     weighted_return = None
+    weighted_mom = None
     if valid_caps and total_cap and total_cap > 0:
-        w_sum = 0.0
-        cap_sum = 0.0
-        for s, cap in valid_caps.items():
-            ret = returns_1y.get(s)
-            if ret is not None and not _is_nan(ret):
-                w_sum += cap * ret
-                cap_sum += cap
-        if cap_sum > 0:
-            weighted_return = w_sum / cap_sum
+        weighted_return = _weighted_by_cap(valid_caps, returns_1y)
+        if momentum is not None:
+            weighted_mom = _weighted_by_cap(valid_caps, momentum)
 
     # 赛道营收增长中位数（用 CAGR 或 YoY 的中位数）
     yoy_values = []
@@ -192,10 +203,13 @@ def compute_lane_summary(
             yoy_values.append(gm.revenue_yoy)
     median_growth = float(pd.Series(yoy_values).median()) if yoy_values else None
 
-    return {
+    out = {
         "赛道": lane_name,
         "成分数": n,
         "合计市值": total_cap,
         "近1年涨幅(市值加权)": weighted_return,
-        "营收增长中位数": median_growth,
     }
+    if momentum is not None:
+        out["12-1动量(市值加权)"] = weighted_mom
+    out["营收增长中位数"] = median_growth
+    return out

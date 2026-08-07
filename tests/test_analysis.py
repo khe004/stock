@@ -699,6 +699,36 @@ class TestAiInfraLaneSummary:
         assert s["成分数"] == 2
         assert s["合计市值"] == pytest.approx(4000.0)
 
+    def test_weighted_momentum(self):
+        """赛道 12-1 动量同样市值加权，与近1年涨幅同口径。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"A": 1000.0, "B": 3000.0}
+        returns = {"A": 0.10, "B": 0.30}
+        mom = {"A": 0.20, "B": 0.60}
+        growth = {"A": GrowthMetrics("A", None, None, None, None, None),
+                  "B": GrowthMetrics("B", None, None, None, None, None)}
+        s = compute_lane_summary("test", ["A", "B"], caps, growth, returns, mom)
+        expected = (1000 * 0.20 + 3000 * 0.60) / 4000  # = 0.50
+        assert s["12-1动量(市值加权)"] == pytest.approx(expected)
+
+    def test_momentum_column_omitted_when_not_provided(self):
+        """不传 momentum 时不输出该列（向后兼容，既有调用方不受影响）。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"A": 1000.0}
+        growth = {"A": GrowthMetrics("A", None, None, 0.1, None, None)}
+        s = compute_lane_summary("test", ["A"], caps, growth, {"A": 0.1})
+        assert "12-1动量(市值加权)" not in s
+
+    def test_weighted_momentum_skips_missing_values(self):
+        """某成分动量缺失时，其市值不计入分母（不能当 0 拉低整条赛道）。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"A": 1000.0, "B": 3000.0}
+        mom = {"A": 0.20, "B": None}          # B 缺动量（如次新股窗口不足）
+        growth = {"A": GrowthMetrics("A", None, None, None, None, None),
+                  "B": GrowthMetrics("B", None, None, None, None, None)}
+        s = compute_lane_summary("test", ["A", "B"], caps, growth, {}, mom)
+        assert s["12-1动量(市值加权)"] == pytest.approx(0.20)  # 只由 A 决定，不是 0.05
+
     def test_median_growth(self):
         """营收增长中位数用的是 YoY。"""
         from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary

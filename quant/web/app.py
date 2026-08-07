@@ -2515,11 +2515,13 @@ def render_ai_infra():
 
     # ── 赛道概览表 ──
     st.subheader("赛道概览")
-    st.caption("赛道涨幅=市值加权（非等权）；营收增长=成分中位数（非均值）")
+    st.caption("赛道涨幅与 12-1 动量均为市值加权（非等权）；营收增长=成分中位数（非均值）。"
+               "「近1年涨幅」是已经走完的行情，「12-1动量」跳过最近 1 个月、反映当前趋势强弱——"
+               "两者背离时（如涨幅高但动量已回落）说明该赛道行情可能正在退潮。")
     lane_summaries = []
     for lane_name, lane_syms in lanes.items():
         summary = compute_lane_summary(lane_name, lane_syms, market_caps,
-                                        growth_metrics, returns_1y)
+                                        growth_metrics, returns_1y, mom_dict)
         lane_summaries.append(summary)
 
     overview_df = pd.DataFrame(lane_summaries)
@@ -2531,6 +2533,8 @@ def render_ai_infra():
                 else (f"${x/1e9:.0f}B" if x else "—"))
         if "近1年涨幅(市值加权)" in overview_df.columns:
             fmt_overview["近1年涨幅(市值加权)"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
+        if "12-1动量(市值加权)" in overview_df.columns:
+            fmt_overview["12-1动量(市值加权)"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
         if "营收增长中位数" in overview_df.columns:
             fmt_overview["营收增长中位数"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
 
