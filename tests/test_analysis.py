@@ -711,6 +711,37 @@ class TestAiInfraLaneSummary:
         expected = (1000 * 0.20 + 3000 * 0.60) / 4000  # = 0.50
         assert s["12-1动量(市值加权)"] == pytest.approx(expected)
 
+    def test_multi_period_returns_weighted_and_optional(self):
+        """3/5 年涨幅同样市值加权；不传时不输出对应列（向后兼容）。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"A": 1000.0, "B": 3000.0}
+        growth = {"A": GrowthMetrics("A", None, None, None, None, None),
+                  "B": GrowthMetrics("B", None, None, None, None, None)}
+        s = compute_lane_summary("t", ["A", "B"], caps, growth, {"A": 0.1, "B": 0.2},
+                                 returns_3y={"A": 0.5, "B": 1.5},
+                                 returns_5y={"A": 1.0, "B": 3.0})
+        assert s["近3年涨幅(市值加权)"] == pytest.approx((1000 * 0.5 + 3000 * 1.5) / 4000)
+        assert s["近5年涨幅(市值加权)"] == pytest.approx((1000 * 1.0 + 3000 * 3.0) / 4000)
+        # 不传则不输出
+        s2 = compute_lane_summary("t", ["A", "B"], caps, growth, {"A": 0.1, "B": 0.2})
+        assert "近3年涨幅(市值加权)" not in s2 and "近5年涨幅(市值加权)" not in s2
+
+    def test_short_history_excluded_from_that_period_only(self):
+        """次新股在长周期列上缺数据时，其市值只从该列分母剔除，不影响短周期列。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"OLD": 1000.0, "NEW": 9000.0}   # 次新股市值很大，若按 0 计会毁掉读数
+        growth = {"OLD": GrowthMetrics("OLD", None, None, None, None, None),
+                  "NEW": GrowthMetrics("NEW", None, None, None, None, None)}
+        s = compute_lane_summary(
+            "t", ["OLD", "NEW"], caps, growth,
+            {"OLD": 0.10, "NEW": 0.90},          # 1 年：两者都有
+            returns_5y={"OLD": 2.0, "NEW": None},  # 5 年：次新股无数据
+        )
+        # 1 年列两者都参与
+        assert s["近1年涨幅(市值加权)"] == pytest.approx((1000 * 0.10 + 9000 * 0.90) / 10000)
+        # 5 年列只由 OLD 决定，不是被 NEW 的 0 拉低成 0.2
+        assert s["近5年涨幅(市值加权)"] == pytest.approx(2.0)
+
     def test_momentum_column_omitted_when_not_provided(self):
         """不传 momentum 时不输出该列（向后兼容，既有调用方不受影响）。"""
         from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary

@@ -109,6 +109,10 @@ _FUNDAMENTALS_MAP = {
     "marketCap": "market_cap",
     "bookValue": "book_value",
     "beta": "beta",
+    # Yahoo 口径：revenueGrowth = 最新季度营收同比（不是年报同比）；
+    # earningsGrowth = 最新季度盈利同比。比年报口径新 6~12 个月，见 AI 基建页说明。
+    "revenueGrowth": "revenue_growth",
+    "earningsGrowth": "earnings_growth",
 }
 
 

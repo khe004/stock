@@ -60,10 +60,18 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     market_cap      REAL,
     book_value      REAL,
     beta            REAL,
+    revenue_growth  REAL,
+    earnings_growth REAL,
     raw_json        TEXT,
     PRIMARY KEY (symbol, date)
 );
 """
+
+# fundamentals 后加的列 → 类型（旧库自愈补列用；数据宝贵不 DROP 重建）
+FUNDAMENTALS_ADDED_COLS = {
+    "revenue_growth": "REAL",
+    "earnings_growth": "REAL",
+}
 
 SCHEMA_FINANCIALS = """
 CREATE TABLE IF NOT EXISTS financials (
@@ -117,6 +125,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
             "SELECT name FROM sqlite_master WHERE type='table'")}:
         conn.executescript(SCHEMA_FUNDAMENTALS)
         log.info("fundamentals 表不存在，已自动创建")
+    else:
+        fund_missing = set(FUNDAMENTALS_ADDED_COLS) - _table_cols(conn, "fundamentals")
+        for col in sorted(fund_missing):
+            conn.execute(
+                f"ALTER TABLE fundamentals ADD COLUMN {col} {FUNDAMENTALS_ADDED_COLS[col]}")
+            log.warning("fundamentals 表缺列 %s，已补加（值为空，可从 raw_json 回填）", col)
     conn.commit()
 
 
@@ -238,8 +252,8 @@ def upsert_fundamentals(conn: sqlite3.Connection, symbol: str, date: str,
             trailing_pe, forward_pe, price_to_book, price_to_sales,
             ev_to_ebitda, peg_ratio, dividend_yield, trailing_eps,
             return_on_equity, profit_margins, gross_margins, debt_to_equity,
-            market_cap, book_value, beta, raw_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            market_cap, book_value, beta, revenue_growth, earnings_growth, raw_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             symbol, date, captured_at,
             metrics.get("trailing_pe"), metrics.get("forward_pe"),
@@ -250,6 +264,7 @@ def upsert_fundamentals(conn: sqlite3.Connection, symbol: str, date: str,
             metrics.get("gross_margins"), metrics.get("debt_to_equity"),
             metrics.get("market_cap"), metrics.get("book_value"),
             metrics.get("beta"),
+            metrics.get("revenue_growth"), metrics.get("earnings_growth"),
             json.dumps(raw, ensure_ascii=False) if raw else None,
         ),
     )

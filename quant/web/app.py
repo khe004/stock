@@ -2392,7 +2392,8 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
 
 
 # AI 基建赛道概览里的百分比列（显示时 ×100，配 printf 格式；见 render_ai_infra 内注释）
-_AI_PCT_COLS = ["近1年涨幅(市值加权)", "12-1动量(市值加权)", "营收增长中位数"]
+_AI_PCT_COLS = ["近1年涨幅(市值加权)", "近3年涨幅(市值加权)", "近5年涨幅(市值加权)",
+                "12-1动量(市值加权)", "营收增长中位数"]
 
 
 def render_ai_infra():
@@ -2416,7 +2417,11 @@ def render_ai_infra():
         "不是 AI 业务占营收的比例。MSFT 在「云与超大规模」赛道市值占比很高，但它的 AI 基建"
         "业务占自身营收的比例远低于 NVDA。yfinance 拿不到业务分部数据，我们**无法量化"
         "「AI 纯度」**。这个页面回答的是「这条赛道里谁体量大」，不是「谁最纯粹受益于 AI」。\n\n"
-        "增长指标用的是**年度利润表（financials 表）**口径，与市场筛选页的 TTM 快照口径不同。"
+        "**增长指标有两种口径，别混用**：「营收同比(季)」是 Yahoo `revenueGrowth` = **最新季度**"
+        "同比，最新但单季波动大、易被低基数放大（如 MU 存储周期反转后 +346%）；"
+        "「营收CAGR」「毛利率」「净利率」来自**年度利润表**，更平滑但**滞后 6~12 个月**"
+        "（最新财年早已结束，MU 的年报同比只有 +49%）。赛道概览的「营收增长中位数」用季度口径，"
+        "与股价涨幅的时效对齐。"
         "赛道近 1 年涨幅用**市值加权**（不是等权——等权会让一只小盘股的暴涨绑架整条赛道的读数）；"
         "赛道营收增长用**中位数**（不用均值，避免 NVDA +100% 这种极值绑架）。",
         icon="ℹ️",
@@ -2473,19 +2478,32 @@ def render_ai_infra():
                 sym_fin = pd.DataFrame()
             growth_metrics[s] = compute_growth_metrics(sym_fin, s)
 
-        # 近 1 年涨幅（用 adj_close 总回报口径）
+        # 近 1/3/5 年涨幅（adj_close 总回报口径）。历史不足一律 None——**不退化成
+        # "上市以来涨幅"**：次新股（SNDK 仅 371 天）的 1.5 年 +4000% 若冒充"5年涨幅"，
+        # 会把整条赛道的加权读数彻底污染。缺失项在市值加权时连同其市值一并剔除。
+        def _trailing(adj: pd.Series, bars: int) -> float | None:
+            a = adj.dropna()
+            if len(a) < bars:
+                return None
+            return float(a.iloc[-1] / a.iloc[-bars] - 1)
+
         returns_1y: dict[str, float | None] = {}
+        returns_3y: dict[str, float | None] = {}
+        returns_5y: dict[str, float | None] = {}
         for s in all_syms:
-            if s not in all_prices:
-                returns_1y[s] = None
-                continue
-            adj = price_series(all_prices[s]).dropna()
-            if len(adj) >= 252:
-                returns_1y[s] = float(adj.iloc[-1] / adj.iloc[-252] - 1)
-            elif len(adj) >= 2:
-                returns_1y[s] = float(adj.iloc[-1] / adj.iloc[0] - 1)
-            else:
-                returns_1y[s] = None
+            adj = price_series(all_prices[s]).dropna() if s in all_prices else pd.Series(dtype=float)
+            returns_1y[s] = _trailing(adj, 252)
+            returns_3y[s] = _trailing(adj, 756)
+            returns_5y[s] = _trailing(adj, 1260)
+
+        # 营收同比：用 Yahoo 的 revenueGrowth = **最新季度**同比。年报同比滞后 6~12 个月
+        # （最新财年早已结束，MU 那种滞后 340 天的会把 +346% 的季度增长显示成 +49%）。
+        rev_growth_q: dict[str, float | None] = {}
+        for s in all_syms:
+            v = (latest_fund.at[s, "revenue_growth"]
+                 if s in latest_fund.index and "revenue_growth" in latest_fund.columns
+                 else None)
+            rev_growth_q[s] = float(v) if v is not None and pd.notna(v) else None
 
         # 12-1 动量（复用 selectors.momentum_return）
         mom_dict: dict[str, float | None] = {}
@@ -2520,13 +2538,19 @@ def render_ai_infra():
     # ── 赛道概览表 ──
     st.subheader("赛道概览")
     st.caption("赛道涨幅与 12-1 动量均为市值加权（非等权）；营收增长=成分中位数（非均值）。"
-               "「近1年涨幅」是已经走完的行情，「12-1动量」跳过最近 1 个月、反映当前趋势强弱——"
-               "两者背离时（如涨幅高但动量已回落）说明该赛道行情可能正在退潮。")
+               "「近1/3/5年涨幅」是已经走完的行情，「12-1动量」跳过最近 1 个月、反映当前趋势强弱——"
+               "两者背离时（如涨幅高但动量已回落）说明该赛道行情可能正在退潮。\n\n"
+               "⚠️ 上市/分拆晚于窗口的成分（ARM、GEV、SNDK、CEG 等）在该期涨幅上无数据，"
+               "其市值一并从该列加权分母中剔除（不按 0 计）——所以**同一行的 1/3/5 年涨幅"
+               "未必基于同一批成分**，跨列比较时注意这点。")
     lane_summaries = []
     for lane_name, lane_syms in lanes.items():
         summary = compute_lane_summary(lane_name, lane_syms, market_caps,
                                         growth_metrics, returns_1y,
-                                        momentum=mom_dict)
+                                        momentum=mom_dict,
+                                        returns_3y=returns_3y,
+                                        returns_5y=returns_5y,
+                                        revenue_growth_q=rev_growth_q)
         lane_summaries.append(summary)
 
     overview_df = pd.DataFrame(lane_summaries)
@@ -2569,6 +2593,13 @@ def render_ai_infra():
             # 数值列一律保留原始数值（缺失=None），格式化交给 column_config，
             # 否则点表头按字典序排。CAGR 的"几年"标注单独拆一列，既保住信息又不毁排序。
             vp = value_pctile.get(s)
+            # forward PE：取自基本面最新快照（TTM 快照口径，与本页增长指标的财年口径不同）。
+            # 负值（亏损公司的 forward PE）置空——负 PE 在估值上无意义，留着会污染排序。
+            fpe = None
+            if s in latest_fund.index and "forward_pe" in latest_fund.columns:
+                _v = latest_fund.at[s, "forward_pe"]
+                if pd.notna(_v) and float(_v) > 0:
+                    fpe = float(_v)
             detail_rows.append({
                 "代码": s,
                 "市值份额": shares.get(s),
@@ -2576,10 +2607,11 @@ def render_ai_infra():
                 "营收CAGR": gm.revenue_cagr if gm else None,
                 "CAGR年数": (f"{gm.cagr_years}年"
                              if gm and gm.cagr_years is not None else "—"),
-                "营收同比": gm.revenue_yoy if gm else None,
+                "营收同比(季)": rev_growth_q.get(s),
                 "毛利率": gm.gross_margin if gm else None,
                 "净利率": gm.net_margin if gm else None,
                 "12-1动量": mom_dict.get(s),
+                "forward PE": fpe,
                 "价值分位": vp,
                 # 价值分位为空时区分"池外无此指标"与"池内但缺数据"——数值列放不下这个
                 # 说明，单独一列标注，保证价值分位列仍可按数值排序
@@ -2597,7 +2629,7 @@ def render_ai_infra():
 
         # 同概览表：百分比列 ×100 保数值排序 + 保住正负号；市值单位写进列名
         display_detail = detail_df.copy()
-        signed_cols = ["营收CAGR", "营收同比", "12-1动量"]      # 可能为负，带 +/- 号
+        signed_cols = ["营收CAGR", "营收同比(季)", "12-1动量"]   # 可能为负，带 +/- 号
         plain_cols = ["市值份额", "毛利率", "净利率", "价值分位"]  # 恒非负，不需要 + 号
         for c in signed_cols + plain_cols:
             if c in display_detail.columns:
@@ -2606,6 +2638,8 @@ def render_ai_infra():
             display_detail, width="stretch", hide_index=True,
             column_config={
                 "市值": st.column_config.NumberColumn("市值($)", format="compact"),
+                # forward PE 是倍数不是百分比，单独格式化；越低越便宜
+                "forward PE": st.column_config.NumberColumn("forward PE", format="%.1f"),
                 **{c: st.column_config.NumberColumn(c, format="%+.1f%%")
                    for c in signed_cols if c in display_detail.columns},
                 **{c: st.column_config.NumberColumn(c, format="%.1f%%")

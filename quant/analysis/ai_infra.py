@@ -167,15 +167,22 @@ def compute_lane_summary(
     growth_metrics: dict[str, GrowthMetrics],
     returns_1y: dict[str, float | None],
     momentum: dict[str, float | None] | None = None,
+    returns_3y: dict[str, float | None] | None = None,
+    returns_5y: dict[str, float | None] | None = None,
+    revenue_growth_q: dict[str, float | None] | None = None,
 ) -> dict:
     """计算单条赛道的汇总数据。
 
-    returns_1y: symbol -> 近 1 年涨幅（小数），用于市值加权赛道涨幅。
-    momentum:   symbol -> 12-1 动量（小数），同样市值加权——与近1年涨幅同口径，
-                便于横向对比"已经涨完的"（近1年）与"当前动量强弱"（12-1，跳过最近1个月）。
-                传 None 时不输出该列（向后兼容）。
+    returns_1y/3y/5y: symbol -> 各期涨幅（小数），市值加权成赛道涨幅。
+    momentum:   symbol -> 12-1 动量（小数），同样市值加权——与涨幅同口径，
+                便于横向对比"已经涨完的"（历史涨幅）与"当前动量强弱"（12-1，跳过最近1个月）。
+    三个可选参数传 None 时不输出对应列（向后兼容）。
 
-    返回 dict：{赛道, 成分数, 合计市值, 近1年涨幅(市值加权), 12-1动量(市值加权),
+    **短历史成分的处理**：某成分该期涨幅缺失（上市/分拆晚于窗口）时，其市值不计入该列的
+    加权分母——赛道读数只由有完整历史的成分决定，不会被次新股的短期暴涨污染。代价是
+    该列实际覆盖的成分可能少于赛道全部成分，跨列比较时需注意（页面 caption 已注明）。
+
+    返回 dict：{赛道, 成分数, 合计市值, 近1/3/5年涨幅(市值加权), 12-1动量(市值加权),
                 营收增长中位数}
     """
     # 成分数
@@ -187,20 +194,27 @@ def compute_lane_summary(
                   and _is_positive(market_caps[s])}
     total_cap = sum(valid_caps.values()) if valid_caps else None
 
-    # 赛道近 1 年涨幅 / 12-1 动量（均为市值加权，同口径）
+    # 赛道各期涨幅 / 12-1 动量（均为市值加权，同口径）
     weighted_return = None
-    weighted_mom = None
+    weighted_3y = weighted_5y = weighted_mom = None
     if valid_caps and total_cap and total_cap > 0:
         weighted_return = _weighted_by_cap(valid_caps, returns_1y)
+        if returns_3y is not None:
+            weighted_3y = _weighted_by_cap(valid_caps, returns_3y)
+        if returns_5y is not None:
+            weighted_5y = _weighted_by_cap(valid_caps, returns_5y)
         if momentum is not None:
             weighted_mom = _weighted_by_cap(valid_caps, momentum)
 
-    # 赛道营收增长中位数（用 CAGR 或 YoY 的中位数）
-    yoy_values = []
-    for s in lane_symbols:
-        gm = growth_metrics.get(s)
-        if gm and gm.revenue_yoy is not None:
-            yoy_values.append(gm.revenue_yoy)
+    # 赛道营收增长中位数。优先用最新季度同比（revenue_growth_q）——年报同比滞后 6~12 个月
+    # （最新财年早已结束），会出现"赛道股价涨 900% 但营收增长只显示 40%"这种自相矛盾的读数。
+    # 未提供季度数据时回落到年报同比（向后兼容）。
+    if revenue_growth_q is not None:
+        yoy_values = [v for s in lane_symbols
+                      if (v := revenue_growth_q.get(s)) is not None and not _is_nan(v)]
+    else:
+        yoy_values = [gm.revenue_yoy for s in lane_symbols
+                      if (gm := growth_metrics.get(s)) and gm.revenue_yoy is not None]
     median_growth = float(pd.Series(yoy_values).median()) if yoy_values else None
 
     out = {
@@ -209,6 +223,10 @@ def compute_lane_summary(
         "合计市值": total_cap,
         "近1年涨幅(市值加权)": weighted_return,
     }
+    if returns_3y is not None:
+        out["近3年涨幅(市值加权)"] = weighted_3y
+    if returns_5y is not None:
+        out["近5年涨幅(市值加权)"] = weighted_5y
     if momentum is not None:
         out["12-1动量(市值加权)"] = weighted_mom
     out["营收增长中位数"] = median_growth
