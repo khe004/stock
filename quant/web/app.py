@@ -2426,6 +2426,13 @@ def render_ai_infra():
         "「营收CAGR」「毛利率」「净利率」来自**年度利润表**，更平滑但**滞后 6~12 个月**"
         "（最新财年早已结束，MU 的年报同比只有 +49%）。赛道概览的「营收增长中位数」用季度口径，"
         "与股价涨幅的时效对齐。\n\n"
+        "📉 **动量量的是价格，增速量的是基本面——两者背离的差额就是估值**。明细表里"
+        "「12-1动量」低而「营收CAGR」高的标的（如 2026-08 的 NVDA：营收 3 年 +100% CAGR、"
+        "股价却只涨 15%、forward PE 压到 16），是**兑现了但估值被收走**；反过来 INTC 营收"
+        "CAGR **-5.7%** 却涨 446%、PE 顶到 49，那 446% 里没有一分来自增长，全是困境反转的"
+        "估值扩张。**别把动量榜首当质量榜首。**\n\n"
+        "「近1月」是 12-1 动量**跳过的那 21 天**，两列并排看才能发现轮动掉头："
+        "12-1 靠 skip=21 躲短期反转，代价是排名滞后于正在发生的轮动。\n\n"
         "🌏 **含非美龙头**（三星/SK海力士/中际旭创/东京电子/爱德万/鸿海等）："
         "它们的**市值已按最新汇率换算成美元**才参与统治力与合计市值计算（否则把万亿韩元与"
         "十亿美元相加是垃圾数字）；但**涨幅与 12-1 动量是本币计价收益**，与美元收益差一个"
@@ -2524,11 +2531,16 @@ def render_ai_infra():
                 return None
             return float(a.iloc[-1] / a.iloc[-bars] - 1)
 
+        returns_1m: dict[str, float | None] = {}
         returns_1y: dict[str, float | None] = {}
         returns_3y: dict[str, float | None] = {}
         returns_5y: dict[str, float | None] = {}
         for s in all_syms:
             adj = price_series(all_prices[s]).dropna() if s in all_prices else pd.Series(dtype=float)
+            # 近 1 月 = 12-1 动量**跳过的那 21 天**（bars=22 ⇒ adj[-1]/adj[-22]）。
+            # 故意与 skip 对齐：12-1 看不见的正是这一段，两列并排才能看出轮动掉头
+            # （2026-08 实测：INTC/MRVL/AMD 的 12-1 排前三但近 1 月全转负）。
+            returns_1m[s] = _trailing(adj, 22)
             returns_1y[s] = _trailing(adj, 252)
             returns_3y[s] = _trailing(adj, 756)
             returns_5y[s] = _trailing(adj, 1260)
@@ -2654,6 +2666,7 @@ def render_ai_infra():
                 "毛利率": gm.gross_margin if gm else None,
                 "净利率": gm.net_margin if gm else None,
                 "12-1动量": mom_dict.get(s),
+                "近1月": returns_1m.get(s),
                 "forward PE": fpe,
                 "价值分位": vp,
                 # 价值分位为空时区分"池外无此指标"与"池内但缺数据"——数值列放不下这个
@@ -2672,7 +2685,7 @@ def render_ai_infra():
 
         # 同概览表：百分比列 ×100 保数值排序 + 保住正负号；市值单位写进列名
         display_detail = detail_df.copy()
-        signed_cols = ["营收CAGR", "营收同比(季)", "12-1动量"]   # 可能为负，带 +/- 号
+        signed_cols = ["营收CAGR", "营收同比(季)", "12-1动量", "近1月"]  # 可能为负，带 +/- 号
         plain_cols = ["市值份额", "毛利率", "净利率", "价值分位"]  # 恒非负，不需要 + 号
         for c in signed_cols + plain_cols:
             if c in display_detail.columns:
