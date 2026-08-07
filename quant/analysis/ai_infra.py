@@ -5,6 +5,10 @@
 增长指标从 financials 表（年度利润表）算出，口径与 fundamentals 表的 TTM 快照不同：
 - 营收 3 年 CAGR：(最新财年营收 / 3年前营收)^(1/3) - 1。年报不足 4 期时按实际期数降级
   （如只有 3 期就算 2 年 CAGR），并在返回值里标注实际用了几年。
+  **这一列跨了一整轮半导体周期，不是"AI 时代的增速"**：起点 FY2022 恰是存储/模拟的周期顶，
+  MU 的 3 年 CAGR 只有 +6.7% 而最新季度同比是 +345.7%，差 50 倍——因为一个从周期顶量起、
+  一个从周期底量起。窗口内出现单年断崖的（业务分拆或周期顶）由 `cagr_break` 标出，页面打备注；
+  INTC 那种连年小幅下滑不打标，它的负 CAGR 是真实的结构性掉队。
 - 毛利率/净利率：最新财年 gross_profit/net_income / revenue（不用 fundamentals.gross_margins
   的 TTM 口径，避免同一页两个毛利率打架）。
 
@@ -33,6 +37,7 @@ class GrowthMetrics:
     revenue_yoy: float | None        # 营收最近一年同比（小数）
     gross_margin: float | None       # 毛利率（小数，如 0.71 = 71%）
     net_margin: float | None         # 净利率（小数）
+    cagr_break: float | None = None  # CAGR 窗口内最大单年营收跌幅（小数，负值），无断崖为 None
 
 
 def compute_growth_metrics(fin_df: pd.DataFrame, symbol: str) -> GrowthMetrics:
@@ -91,8 +96,26 @@ def compute_growth_metrics(fin_df: pd.DataFrame, symbol: str) -> GrowthMetrics:
         if start_rev > 0 and end_rev > 0:
             result.revenue_cagr = (end_rev / start_rev) ** (1 / actual_years) - 1
             result.cagr_years = actual_years
+            result.cagr_break = _worst_yoy_drop(rev_rows.iloc[-1 - actual_years:])
 
     return result
+
+
+# CAGR 失真阈值：窗口内单年营收跌幅超过这个数就打备注。
+# 40% 不是统计出来的，是"正常经营波动到不了、必须是周期顶起量或业务被拆走"的经验线：
+# WDC 分拆 SanDisk 后 -66%，MU 撞上 2022 存储周期顶后 -50%，都被抓住；
+# INTC 那种连年 -3%~-14% 的真实结构性下滑不会被误标，它的负 CAGR 就该原样呈现。
+CAGR_BREAK_THRESHOLD = -0.40
+
+
+def _worst_yoy_drop(rev_rows: pd.DataFrame) -> float | None:
+    """CAGR 窗口内最大的单年营收跌幅；没有超过阈值的断崖则返回 None。"""
+    revs = [float(v) for v in rev_rows["revenue"]]
+    drops = [revs[i] / revs[i - 1] - 1 for i in range(1, len(revs)) if revs[i - 1] > 0]
+    if not drops:
+        return None
+    worst = min(drops)
+    return worst if worst <= CAGR_BREAK_THRESHOLD else None
 
 
 def _is_nan(v) -> bool:

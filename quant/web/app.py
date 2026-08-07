@@ -2646,6 +2646,10 @@ def render_ai_infra():
                 "营收CAGR": gm.revenue_cagr if gm else None,
                 "CAGR年数": (f"{gm.cagr_years}年"
                              if gm and gm.cagr_years is not None else "—"),
+                # 窗口内有单年营收断崖 → CAGR 起点不可比（业务分拆或周期顶），标出来。
+                # 不改 CAGR 数值本身：删了会连 INTC 那种真实下滑一起丢掉
+                "CAGR备注": (f"⚠️ 期间{gm.cagr_break * 100:+.0f}%"
+                             if gm and gm.cagr_break is not None else ""),
                 "营收同比(季)": rev_growth_q.get(s),
                 "毛利率": gm.gross_margin if gm else None,
                 "净利率": gm.net_margin if gm else None,
@@ -2685,6 +2689,16 @@ def render_ai_infra():
                    for c in plain_cols if c in display_detail.columns},
             },
         )
+
+        # CAGR 断崖说明：只有本赛道真有标的被标记时才出现，避免刷屏
+        broken = [r["代码"] for r in detail_rows if r["CAGR备注"]]
+        if broken:
+            st.caption(
+                f"⚠️ {', '.join(broken)} 的营收 CAGR 窗口内出现单年断崖（跌幅 >40%），"
+                f"**起点不可比、CAGR 失真**：要么业务被分拆剥离（如 WDC 2025 年拆出 SanDisk，"
+                f"营收腰斩不是经营萎缩），要么起点撞上周期顶（MU 的 3 年 CAGR 只有 +6.7%，"
+                f"而最新季度同比 +345.7%）。看 AI 拉动强度请用「营收同比(季)」列。"
+            )
 
         # 池外标的说明
         pool_external = [s for s in lane_syms if s not in sp500_syms_set]

@@ -570,6 +570,46 @@ class TestAiInfraGrowth:
         assert m.cagr_years == 2  # 标注为 2 年，不是 3 年
         assert m.revenue_cagr == pytest.approx(1.0, abs=0.001)  # (400/100)^(1/2)-1 = 1.0
 
+    def test_cagr_break_flags_spinoff(self):
+        """WDC 场景：窗口内营收断崖（分拆）→ cagr_break 记录最大跌幅。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2022-06-30", 18800, 4000, 1500),
+            ("2023-06-30", 6300, 500, -1700),   # -66%：闪存业务被拆走
+            ("2024-06-30", 6300, 1200, -800),
+            ("2025-06-30", 9500, 3600, 1900),
+        ])
+        m = compute_growth_metrics(df, "WDC")
+        assert m.revenue_cagr < 0            # 断崖把 CAGR 拖成负的
+        assert m.cagr_break == pytest.approx(-0.665, abs=0.005)
+
+    def test_cagr_break_none_for_steady_decline(self):
+        """INTC 场景：连年小幅下滑不是断崖 → 不打标，负 CAGR 原样呈现。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2022-12-31", 63100, 26900, 8000),
+            ("2023-12-31", 54200, 21700, 1700),   # -14%，没到 -40%
+            ("2024-12-31", 53100, 17000, -18800),
+            ("2025-12-31", 52900, 18400, -300),
+        ])
+        m = compute_growth_metrics(df, "INTC")
+        assert m.revenue_cagr < 0
+        assert m.cagr_break is None
+
+    def test_cagr_break_ignores_drop_outside_window(self):
+        """断崖发生在 CAGR 窗口之外（第 5 期往前）→ 不打标。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2021-12-31", 1000, 500, 100),
+            ("2022-12-31", 200, 100, 20),    # -80%，但在 3 年窗口起点之前
+            ("2023-12-31", 220, 110, 22),
+            ("2024-12-31", 240, 120, 24),
+            ("2025-12-31", 260, 130, 26),
+        ])
+        m = compute_growth_metrics(df, "X")
+        assert m.cagr_years == 3             # 窗口 = 2022~2025
+        assert m.cagr_break is None
+
     def test_single_period_no_growth(self):
         """只有 1 期年报 → 无法算增长，CAGR 和 YoY 都为 None。"""
         from quant.analysis.ai_infra import compute_growth_metrics
