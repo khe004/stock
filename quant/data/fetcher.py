@@ -160,3 +160,73 @@ def update_fundamentals(conn, symbols: list[str], as_of_date: str,
         log.info("%s 基本面快照已更新 (date=%s)", symbol, as_of_date)
         ok_count += 1
     return ok_count, failed
+
+
+# ---------- 年度财报（financials 表，供 AI 基建页增长指标用）----------
+
+def fetch_financials(symbol: str) -> pd.DataFrame | None:
+    """拉取 yfinance 年度利润表（income_stmt），带指数退避重试。
+
+    返回 DataFrame（行=指标，列=财年结束日）或 None（重试用尽仍失败）。"""
+    last_err: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        stmt = None
+        try:
+            stmt = yf.Ticker(symbol).income_stmt
+        except Exception as e:  # noqa: BLE001 - yfinance 抛的异常类型不稳定
+            last_err = e
+        if stmt is not None and not stmt.empty:
+            return stmt
+        if attempt < MAX_RETRIES:
+            wait = 2 ** attempt
+            log.warning("%s 财报第 %d 次拉取%s，%ds 后重试", symbol, attempt,
+                        f"失败: {last_err}" if last_err else "返回空（疑似限流）", wait)
+            time.sleep(wait)
+    log.error("%s 财报拉取失败（重试 %d 次）: %s", symbol, MAX_RETRIES,
+              last_err or "income_stmt 为空")
+    return None
+
+
+def update_financials(conn, symbols: list[str],
+                      stale_days: int = 30) -> tuple[int, list[str]]:
+    """批量更新年度财报。每个 symbol 若最近 stale_days 天内已有拉取记录则跳过（自限流）。
+
+    返回 (成功数, 失败列表)。单个失败只记日志，不中断批量。"""
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat(timespec="seconds")
+    ok_count, failed = 0, []
+    for symbol in symbols:
+        latest = store.latest_financial_date(conn, symbol)
+        if latest and latest >= cutoff:
+            log.debug("%s 财报已是最新（captured_at=%s），跳过", symbol, latest)
+            continue
+        stmt = fetch_financials(symbol)
+        if stmt is None:
+            log.error("%s 财报抓取失败，跳过", symbol)
+            failed.append(symbol)
+            continue
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        rows = []
+        for col in stmt.columns:
+            fiscal_date = col.strftime("%Y-%m-%d") if hasattr(col, 'strftime') else str(col)
+            revenue = stmt.at["Total Revenue", col] if "Total Revenue" in stmt.index else None
+            gross_profit = stmt.at["Gross Profit", col] if "Gross Profit" in stmt.index else None
+            operating_income = stmt.at["Operating Income", col] if "Operating Income" in stmt.index else None
+            net_income = stmt.at["Net Income", col] if "Net Income" in stmt.index else None
+            # Convert numpy types to Python native for SQLite
+            def _to_float(v):
+                if v is None or (hasattr(v, '__class__') and v.__class__.__name__ == 'NaTType'):
+                    return None
+                try:
+                    import math
+                    f = float(v)
+                    return None if math.isnan(f) else f
+                except (TypeError, ValueError):
+                    return None
+            rows.append((fiscal_date, _to_float(revenue), _to_float(gross_profit),
+                         _to_float(operating_income), _to_float(net_income), captured_at))
+        if rows:
+            store.upsert_financials(conn, symbol, rows)
+            log.info("%s 财报已更新（%d 期）", symbol, len(rows))
+            ok_count += 1
+    return ok_count, failed

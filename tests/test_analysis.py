@@ -517,3 +517,196 @@ def test_spans_overlap():
     assert spans_overlap(a0, a1, pd.Timestamp("2019-12-01"), pd.Timestamp("2020-01-05"))  # 部分重叠
     assert spans_overlap(a0, a1, a0, a1)                                                  # 完全重合
     assert not spans_overlap(a0, a1, pd.Timestamp("2020-02-01"), pd.Timestamp("2020-02-28"))  # 无重叠
+
+
+# ── AI 基建计算层 ──
+
+
+def _fin_df(rows):
+    """构造 financials DataFrame 用于测试。
+    rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income), ...]
+    如果 tuple 只有 4 个元素（省略 operating_income），自动补 None。"""
+    expanded = []
+    for r in rows:
+        if len(r) == 4:
+            # (fiscal_date, revenue, gross_profit, net_income) → 插入 operating_income=None
+            expanded.append((r[0], r[1], r[2], None, r[3]))
+        else:
+            expanded.append(r)
+    return pd.DataFrame(expanded, columns=["fiscal_date", "revenue", "gross_profit",
+                                            "operating_income", "net_income"])
+
+
+class TestAiInfraGrowth:
+    """AI 基建增长指标测试。"""
+
+    def test_cagr_3year_normal(self):
+        """4 期年报 → 正常 3 年 CAGR。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        # 营收从 100 增长到 800，3 年 CAGR = (800/100)^(1/3) - 1 = 1.0（+100%）
+        df = _fin_df([
+            ("2022-01-28", 100, 70, 10),
+            ("2023-01-28", 200, 140, 20),
+            ("2024-01-28", 400, 280, 40),
+            ("2025-01-28", 800, 560, 80),
+        ])
+        m = compute_growth_metrics(df, "TEST")
+        assert m.cagr_years == 3
+        assert m.revenue_cagr == pytest.approx(1.0, abs=0.001)  # +100%
+        assert m.revenue_yoy == pytest.approx(1.0, abs=0.001)   # 400→800 = +100%
+        assert m.gross_margin == pytest.approx(0.7, abs=0.001)   # 560/800
+        assert m.net_margin == pytest.approx(0.1, abs=0.001)     # 80/800
+
+    def test_cagr_downgrade_to_2year(self):
+        """只有 3 期年报 → 降级为 2 年 CAGR，并标注 cagr_years=2。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        # SNDK 场景：分拆上市只有 3 期
+        df = _fin_df([
+            ("2023-06-30", 100, 50, 10),
+            ("2024-06-30", 200, 100, 20),
+            ("2025-06-30", 400, 200, 40),
+        ])
+        m = compute_growth_metrics(df, "SNDK")
+        assert m.cagr_years == 2  # 标注为 2 年，不是 3 年
+        assert m.revenue_cagr == pytest.approx(1.0, abs=0.001)  # (400/100)^(1/2)-1 = 1.0
+
+    def test_single_period_no_growth(self):
+        """只有 1 期年报 → 无法算增长，CAGR 和 YoY 都为 None。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([("2025-01-28", 1000, 700, 100)])
+        m = compute_growth_metrics(df, "X")
+        assert m.revenue_cagr is None
+        assert m.cagr_years is None
+        assert m.revenue_yoy is None
+        # 毛利率和净利率仍可算
+        assert m.gross_margin == pytest.approx(0.7, abs=0.001)
+        assert m.net_margin == pytest.approx(0.1, abs=0.001)
+
+    def test_empty_data(self):
+        """空 DataFrame → 全部 None。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = pd.DataFrame(columns=["fiscal_date", "revenue", "gross_profit",
+                                     "operating_income", "net_income"])
+        m = compute_growth_metrics(df, "EMPTY")
+        assert m.revenue_cagr is None
+        assert m.gross_margin is None
+        assert m.net_margin is None
+
+    def test_zero_revenue_returns_none(self):
+        """营收为 0 → CAGR/YoY 返回 None，不用 0 填充。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2023-01-28", 0, 0, 0),
+            ("2024-01-28", 100, 70, 10),
+            ("2025-01-28", 200, 140, 20),
+        ])
+        m = compute_growth_metrics(df, "ZERO")
+        # 第一期营收为 0 被排除，只有 2 期有效 → 1 年 CAGR
+        assert m.cagr_years == 1
+        assert m.revenue_cagr == pytest.approx(1.0, abs=0.001)  # 100→200
+
+    def test_negative_revenue_returns_none(self):
+        """营收为负 → 该期从 CAGR 计算中排除。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2023-01-28", -50, 0, 0),
+            ("2024-01-28", 100, 70, 10),
+            ("2025-01-28", 200, 140, 20),
+        ])
+        m = compute_growth_metrics(df, "NEG")
+        # 负营收期被排除，只有 2 期正营收 → 1 年 CAGR
+        assert m.cagr_years == 1
+
+    def test_missing_revenue_returns_none(self):
+        """营收缺失 → CAGR 为 None。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2023-01-28", None, 50, 10),
+            ("2024-01-28", None, 70, 20),
+        ])
+        m = compute_growth_metrics(df, "MISS")
+        assert m.revenue_cagr is None
+        assert m.revenue_yoy is None
+
+    def test_gross_margin_none_when_revenue_zero(self):
+        """营收为 0 时毛利率应为 None。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([("2025-01-28", 0, 0, 0)])
+        m = compute_growth_metrics(df, "X")
+        assert m.gross_margin is None
+        assert m.net_margin is None
+
+
+class TestAiInfraMarketShare:
+    """赛道统治力（市值份额）测试。"""
+
+    def test_share_sums_to_one(self):
+        """赛道内市值份额加总为 1。"""
+        from quant.analysis.ai_infra import compute_lane_market_share
+        caps = {"A": 1000.0, "B": 2000.0, "C": 3000.0}
+        shares = compute_lane_market_share(["A", "B", "C"], caps)
+        total = sum(v for v in shares.values() if v is not None)
+        assert total == pytest.approx(1.0)
+        assert shares["A"] == pytest.approx(1/6)
+        assert shares["B"] == pytest.approx(2/6)
+        assert shares["C"] == pytest.approx(3/6)
+
+    def test_missing_cap_excluded_from_denominator(self):
+        """市值缺失的成分从分母剔除，份额仍加总为 1（有效成分间）。"""
+        from quant.analysis.ai_infra import compute_lane_market_share
+        caps = {"A": 1000.0, "B": 2000.0, "C": None}
+        shares = compute_lane_market_share(["A", "B", "C"], caps)
+        assert shares["C"] is None
+        valid_total = sum(v for v in shares.values() if v is not None)
+        assert valid_total == pytest.approx(1.0)
+        assert shares["A"] == pytest.approx(1/3)
+
+    def test_all_missing_caps(self):
+        """全部市值缺失 → 全部份额为 None。"""
+        from quant.analysis.ai_infra import compute_lane_market_share
+        caps = {"A": None, "B": None}
+        shares = compute_lane_market_share(["A", "B"], caps)
+        assert shares["A"] is None
+        assert shares["B"] is None
+
+    def test_multi_lane_no_error(self):
+        """同一只股属于多个赛道时不重复计数 / 不报错。"""
+        from quant.analysis.ai_infra import compute_lane_market_share
+        caps = {"AVGO": 5000.0, "NVDA": 10000.0, "ANET": 2000.0, "CSCO": 3000.0}
+        # AVGO 在两个赛道
+        share_compute = compute_lane_market_share(["NVDA", "AVGO"], caps)
+        share_network = compute_lane_market_share(["ANET", "CSCO", "AVGO"], caps)
+        # 各赛道独立计算，不互相干扰
+        assert share_compute["AVGO"] == pytest.approx(5000 / 15000)
+        assert share_network["AVGO"] == pytest.approx(5000 / 10000)
+
+
+class TestAiInfraLaneSummary:
+    """赛道汇总测试。"""
+
+    def test_weighted_return(self):
+        """市值加权近 1 年涨幅。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"A": 1000.0, "B": 3000.0}
+        returns = {"A": 0.10, "B": 0.30}
+        growth = {
+            "A": GrowthMetrics("A", 0.5, 3, 0.10, 0.7, 0.1),
+            "B": GrowthMetrics("B", 0.3, 3, 0.30, 0.6, 0.2),
+        }
+        s = compute_lane_summary("test", ["A", "B"], caps, growth, returns)
+        expected = (1000 * 0.10 + 3000 * 0.30) / 4000  # = 0.25
+        assert s["近1年涨幅(市值加权)"] == pytest.approx(expected)
+        assert s["成分数"] == 2
+        assert s["合计市值"] == pytest.approx(4000.0)
+
+    def test_median_growth(self):
+        """营收增长中位数用的是 YoY。"""
+        from quant.analysis.ai_infra import GrowthMetrics, compute_lane_summary
+        caps = {"A": 1000.0, "B": 1000.0, "C": 1000.0}
+        growth = {
+            "A": GrowthMetrics("A", None, None, 0.10, None, None),
+            "B": GrowthMetrics("B", None, None, 0.50, None, None),
+            "C": GrowthMetrics("C", None, None, 1.00, None, None),
+        }
+        s = compute_lane_summary("test", ["A", "B", "C"], caps, growth, {})
+        assert s["营收增长中位数"] == pytest.approx(0.50)  # 中位数

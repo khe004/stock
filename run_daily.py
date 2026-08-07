@@ -140,6 +140,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.fundamentals_only:
         return 0
 
+    # ── 年度财报（AI 基建页增长指标用）──
+    run_financials = (not args.no_fetch and not args.no_fundamentals) or args.fundamentals_only
+    if run_financials:
+        try:
+            ai_infra_syms = cfg.universe_symbols("universe_ai_infra.yaml")
+            log.info("抓取 %d 个 AI 基建标的年度财报…", len(ai_infra_syms))
+            fin_ok, fin_fail = fetcher.update_financials(conn, ai_infra_syms)
+            log.info("财报更新完成：成功 %d，失败 %d", fin_ok, len(fin_fail))
+        except Exception:  # noqa: BLE001
+            log.error("财报抓取整体异常，不影响信号主流程", exc_info=True)
+
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}
     if not prices:

@@ -2391,12 +2391,236 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
                   f"回撤阈值（{thr:.0%}）而已，调低上面的滑杆阈值能看到更多被计入「真实回撤」的段。")
 
 
+def render_ai_infra():
+    """🤖 AI 基建：按赛道细分的 AI 基建个股观察页面。
+
+    这是一个观察/研究页面，不产生任何交易信号、不接入任何策略、不进模型组合。
+    """
+    from quant.analysis.ai_infra import (
+        compute_growth_metrics,
+        compute_lane_market_share,
+        compute_lane_summary,
+    )
+    from quant.strategies.selectors import momentum_return
+
+    st.title("🤖 AI 基建")
+
+    # ── 顶部说明 ──
+    st.caption("这是一个**观察/研究页面**，不产生任何交易信号、不接入任何策略、不进模型组合。")
+    st.info(
+        "⚠️ **市值份额 ≠ AI 业务份额**：下方「统治力」列是**公司整体市值**在赛道内的占比，"
+        "不是 AI 业务占营收的比例。MSFT 在「云与超大规模」赛道市值占比很高，但它的 AI 基建"
+        "业务占自身营收的比例远低于 NVDA。yfinance 拿不到业务分部数据，我们**无法量化"
+        "「AI 纯度」**。这个页面回答的是「这条赛道里谁体量大」，不是「谁最纯粹受益于 AI」。\n\n"
+        "增长指标用的是**年度利润表（financials 表）**口径，与市场筛选页的 TTM 快照口径不同。"
+        "赛道近 1 年涨幅用**市值加权**（不是等权——等权会让一只小盘股的暴涨绑架整条赛道的读数）；"
+        "赛道营收增长用**中位数**（不用均值，避免 NVDA +100% 这种极值绑架）。",
+        icon="ℹ️",
+    )
+
+    # ── 加载赛道定义 ──
+    try:
+        with open(ROOT / "universe_ai_infra.yaml", encoding="utf-8") as f:
+            lanes: dict[str, list[str]] = yaml.safe_load(f)
+    except (OSError, yaml.YAMLError) as e:
+        st.error(f"无法加载 universe_ai_infra.yaml: {e}")
+        return
+
+    # 去重获取全部标的
+    all_syms_set: dict[str, None] = {}
+    for syms in lanes.values():
+        for s in syms:
+            all_syms_set.setdefault(s)
+    all_syms = list(all_syms_set)
+
+    # ── 加载数据 ──
+    with st.spinner("加载行情、基本面和财报数据…"):
+        # 行情
+        all_prices = {s: store.load_prices(conn, s) for s in all_syms}
+        all_prices = {s: df for s, df in all_prices.items() if not df.empty}
+
+        if not all_prices:
+            st.warning("库内没有 AI 基建标的行情数据，先运行 `python run_daily.py` 拉取数据。")
+            return
+
+        # 基本面（市值用）
+        fdf = store.load_fundamentals(conn)
+        latest_fund = (fdf.sort_values("date").groupby("symbol").last()
+                       if not fdf.empty else pd.DataFrame())
+
+        # 市值字典
+        market_caps: dict[str, float | None] = {}
+        for s in all_syms:
+            if not latest_fund.empty and s in latest_fund.index:
+                mc = latest_fund.at[s, "market_cap"] if "market_cap" in latest_fund.columns else None
+                market_caps[s] = float(mc) if mc is not None and pd.notna(mc) else None
+            else:
+                market_caps[s] = None
+
+        # 财报
+        fin_df = store.load_financials(conn)
+
+        # 增长指标
+        growth_metrics = {}
+        for s in all_syms:
+            if not fin_df.empty:
+                sym_fin = fin_df[fin_df["symbol"] == s]
+            else:
+                sym_fin = pd.DataFrame()
+            growth_metrics[s] = compute_growth_metrics(sym_fin, s)
+
+        # 近 1 年涨幅（用 adj_close 总回报口径）
+        returns_1y: dict[str, float | None] = {}
+        for s in all_syms:
+            if s not in all_prices:
+                returns_1y[s] = None
+                continue
+            adj = price_series(all_prices[s]).dropna()
+            if len(adj) >= 252:
+                returns_1y[s] = float(adj.iloc[-1] / adj.iloc[-252] - 1)
+            elif len(adj) >= 2:
+                returns_1y[s] = float(adj.iloc[-1] / adj.iloc[0] - 1)
+            else:
+                returns_1y[s] = None
+
+        # 12-1 动量（复用 selectors.momentum_return）
+        mom_dict: dict[str, float | None] = {}
+        adj_all = pd.DataFrame({s: price_series(df) for s, df in all_prices.items()}).sort_index()
+        if not adj_all.empty:
+            mom_df = momentum_return(adj_all, lookback=252, skip=21)
+            for s in all_syms:
+                if s in mom_df.columns:
+                    v = mom_df[s].iloc[-1] if not mom_df[s].dropna().empty else None
+                    mom_dict[s] = float(v) if v is not None and pd.notna(v) else None
+                else:
+                    mom_dict[s] = None
+
+        # 价值分位（复用 screening.compute_strength 的行业内中性化逻辑）
+        sp500_map = _stock_sector_map()
+        sp500_syms_set = set(sp500_map.keys())
+        # 只对 S&P500 内的标的算价值分位
+        sp500_prices = {s: all_prices[s] for s in all_syms if s in sp500_syms_set and s in all_prices}
+        value_pctile: dict[str, float | None] = {}
+        if sp500_prices and not latest_fund.empty:
+            strength = compute_strength(sp500_prices, fundamentals=latest_fund, sectors=sp500_map)
+            for s in all_syms:
+                if s in strength.index and "value_score" in strength.columns:
+                    v = strength.at[s, "value_score"]
+                    value_pctile[s] = float(v) if pd.notna(v) else None
+                else:
+                    value_pctile[s] = None
+        else:
+            for s in all_syms:
+                value_pctile[s] = None
+
+    # ── 赛道概览表 ──
+    st.subheader("赛道概览")
+    st.caption("赛道涨幅=市值加权（非等权）；营收增长=成分中位数（非均值）")
+    lane_summaries = []
+    for lane_name, lane_syms in lanes.items():
+        summary = compute_lane_summary(lane_name, lane_syms, market_caps,
+                                        growth_metrics, returns_1y)
+        lane_summaries.append(summary)
+
+    overview_df = pd.DataFrame(lane_summaries)
+    if not overview_df.empty:
+        fmt_overview = {}
+        if "合计市值" in overview_df.columns:
+            overview_df["合计市值"] = overview_df["合计市值"].apply(
+                lambda x: f"${x/1e12:.2f}T" if x and x >= 1e12
+                else (f"${x/1e9:.0f}B" if x else "—"))
+        if "近1年涨幅(市值加权)" in overview_df.columns:
+            fmt_overview["近1年涨幅(市值加权)"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
+        if "营收增长中位数" in overview_df.columns:
+            fmt_overview["营收增长中位数"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
+
+        display_ov = overview_df.copy()
+        for col, fn in fmt_overview.items():
+            if col in display_ov.columns:
+                display_ov[col] = display_ov[col].apply(fn)
+        st.dataframe(display_ov, width="stretch", hide_index=True)
+
+    # ── 赛道明细 ──
+    st.subheader("赛道明细")
+    lane_names = list(lanes.keys())
+    selected_lane = st.selectbox("选择赛道", lane_names, key="ai_infra_lane")
+
+    if selected_lane and selected_lane in lanes:
+        lane_syms = lanes[selected_lane]
+        shares = compute_lane_market_share(lane_syms, market_caps)
+
+        # 构建明细表
+        detail_rows = []
+        for s in lane_syms:
+            gm = growth_metrics.get(s)
+            mc = market_caps.get(s)
+            in_sp500 = s in sp500_syms_set
+
+            # CAGR 标注
+            cagr_str = "—"
+            if gm and gm.revenue_cagr is not None and gm.cagr_years is not None:
+                cagr_str = f"{gm.revenue_cagr:+.0%}（{gm.cagr_years}年）"
+
+            yoy_str = f"{gm.revenue_yoy:+.0%}" if gm and gm.revenue_yoy is not None else "—"
+            gm_str = f"{gm.gross_margin:.0%}" if gm and gm.gross_margin is not None else "—"
+            nm_str = f"{gm.net_margin:.0%}" if gm and gm.net_margin is not None else "—"
+
+            mom_val = mom_dict.get(s)
+            mom_str = f"{mom_val:+.0%}" if mom_val is not None else "—"
+
+            vp = value_pctile.get(s)
+            if vp is not None:
+                vp_str = f"{vp:.0%}"
+            elif not in_sp500:
+                vp_str = "—（池外）"
+            else:
+                vp_str = "—"
+
+            share_val = shares.get(s)
+            share_str = f"{share_val:.0%}" if share_val is not None else "—"
+
+            mc_str = (f"${mc/1e12:.2f}T" if mc and mc >= 1e12
+                      else (f"${mc/1e9:.0f}B" if mc else "—"))
+
+            detail_rows.append({
+                "代码": s,
+                "市值份额": share_str,
+                "市值": mc_str,
+                "营收CAGR": cagr_str,
+                "营收同比": yoy_str,
+                "毛利率": gm_str,
+                "净利率": nm_str,
+                "12-1动量": mom_str,
+                "价值分位": vp_str,
+                "S&P500": "✅" if in_sp500 else "❌",
+            })
+
+        detail_df = pd.DataFrame(detail_rows)
+
+        # 缺失市值的成分数
+        n_missing_cap = sum(1 for s in lane_syms if market_caps.get(s) is None)
+        if n_missing_cap:
+            st.caption(f"⚠️ 本赛道有 {n_missing_cap} 只标的市值缺失，已从统治力分母中剔除。")
+
+        st.dataframe(detail_df, width="stretch", hide_index=True)
+
+        # 池外标的说明
+        pool_external = [s for s in lane_syms if s not in sp500_syms_set]
+        if pool_external:
+            st.caption(
+                f"💡 池外标的（{', '.join(pool_external)}）不在 S&P500 候选池中，"
+                f"无行业内价值分位——价值分位显示「—（池外）」。这是池外标的的已知代价，"
+                f"不影响其他指标的准确性。"
+            )
+
+
 PAGES = {
     "📊 市场概览": render_market_overview,
     "📡 信号历史": render_signal_history,
     "🕯️ K线与信号": render_kline,
     "🏆 动量排名": render_momentum_rank,
     "🔍 市场筛选": render_market_screen,
+    "🤖 AI 基建": render_ai_infra,
     "🛡️ 避险手册": render_drawdown_playbook,
     "🎯 策略评分": render_strategy_scoring,
     "🔗 策略相关性": render_correlation,

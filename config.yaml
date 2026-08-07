@@ -65,6 +65,20 @@ watchlist:
   watch_only:           # 仅观察/攒历史：候选避险资产，历史太短暂不接进任何策略
     - DBMF               # 托管期货趋势跟踪（与股债低相关，通胀型熊市有潜力），2019-05 才上市
                           # 仅约7年历史+只经历过一次真正的通胀熊市(2022)，先攒数据，够长再评估
+  ai_infra:             # AI 基建主题观察池（仅供 AI 基建页展示，不喂给任何策略）
+                        # 组名不被任何策略的 groups 引用 → 不影响任何策略
+    - AMKR
+    - ARM
+    - ASML
+    - COHR
+    - ENTG
+    - FN
+    - LITE
+    - MRVL
+    - PEG
+    - SNDK
+    - TSM
+    - VRT
   aggressive_growth:    # 进攻档宇宙：成长/科技 ETF（进攻）+ TLT（避险）
     - QQQ               # 纳指100
     - XLK               # 科技

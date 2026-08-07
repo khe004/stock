@@ -65,6 +65,19 @@ CREATE TABLE IF NOT EXISTS fundamentals (
 );
 """
 
+SCHEMA_FINANCIALS = """
+CREATE TABLE IF NOT EXISTS financials (
+    symbol TEXT NOT NULL,
+    fiscal_date TEXT NOT NULL,
+    revenue REAL,
+    gross_profit REAL,
+    operating_income REAL,
+    net_income REAL,
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (symbol, fiscal_date)
+);
+"""
+
 
 # 迁移用：两张表的期望列。老版本库（早期在用户机器上重建过的 schema）可能缺列
 PRICES_COL_TYPES = {
@@ -114,6 +127,7 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     conn.executescript(SCHEMA_FUNDAMENTALS)
+    conn.executescript(SCHEMA_FINANCIALS)
     _migrate(conn)
     return conn
 
@@ -267,3 +281,37 @@ def load_fundamentals(
         params.append(start)
     query += " ORDER BY symbol, date"
     return pd.read_sql_query(query, conn, params=params)
+
+
+def upsert_financials(conn: sqlite3.Connection, symbol: str,
+                      rows: list[tuple]) -> int:
+    """写入年度财报数据。rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income, captured_at), ...]。
+    (symbol, fiscal_date) 已存在则覆盖。返回写入行数。"""
+    conn.executemany(
+        """INSERT OR REPLACE INTO financials
+           (symbol, fiscal_date, revenue, gross_profit, operating_income, net_income, captured_at)
+           VALUES (?,?,?,?,?,?,?)""",
+        [(symbol, *r) for r in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def load_financials(conn: sqlite3.Connection,
+                    symbol: str | None = None) -> pd.DataFrame:
+    """按 symbol, fiscal_date 升序返回年度财报。"""
+    query = "SELECT * FROM financials WHERE 1=1"
+    params: list = []
+    if symbol:
+        query += " AND symbol = ?"
+        params.append(symbol)
+    query += " ORDER BY symbol, fiscal_date"
+    return pd.read_sql_query(query, conn, params=params)
+
+
+def latest_financial_date(conn: sqlite3.Connection, symbol: str) -> str | None:
+    """返回该标的最新一条财报的 captured_at，无记录返回 None。"""
+    row = conn.execute(
+        "SELECT MAX(captured_at) AS d FROM financials WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    return row["d"]

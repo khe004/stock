@@ -1,0 +1,15 @@
+# AI 基建主题观察池（12 赛道，含 S&P500 池外标的）
+# 同一只股票可出现在多个赛道（如 AVGO 既做算力也做网络芯片）
+# 赛道归属是主观判断，人工维护；JNPR 已退市（被 HPE 收购）剔除
+算力芯片:      [NVDA, AMD, AVGO, MRVL, INTC, QCOM, TXN]
+存储:          [MU, WDC, STX, SNDK]
+半导体设备:    [AMAT, LRCX, KLAC, TER, ASML, ENTG]
+EDA与IP:       [SNPS, CDNS, ARM]
+网络交换:      [ANET, CSCO, FFIV]
+光模块光通信:  [COHR, LITE, FN, GLW]
+服务器与散热:  [SMCI, DELL, HPE, VRT, JCI, TT, CARR]
+电力:          [CEG, VST, NRG, D, SO, DUK, AEP, ETR, NEE, PCG, EXC, XEL, PEG]
+数据中心REIT:  [EQIX, DLR, AMT, IRM]
+云与超大规模:  [MSFT, GOOGL, AMZN, META, ORCL, IBM, NOW]
+电气设备:      [ETN, PWR, EMR, HUBB, AME, ROK, GEV, PH]
+代工封测:      [TSM, AMKR]
