@@ -2433,6 +2433,19 @@ def render_ai_infra():
         "估值扩张。**别把动量榜首当质量榜首。**\n\n"
         "「近1月」是 12-1 动量**跳过的那 21 天**，两列并排看才能发现轮动掉头："
         "12-1 靠 skip=21 躲短期反转，代价是排名滞后于正在发生的轮动。\n\n"
+        "💰 **估值三列要一起看，别只看 forward PE**。forward PE 的分母是**分析师预期 EPS**，"
+        "跨市场比的其实是分析师乐观程度：2026-08 实测存储赛道，MU 的 forward PE 5.7 看着比"
+        "SK海力士 3.1 只贵一点，但按 **EV/EBITDA 是 13.4 vs 6.9——贵一倍**，按 P/S 11.2 vs 5.4 "
+        "也贵一倍。SNDK 更极端：forward PE 4.6 全场最低，EV/EBITDA 34.9 却是三星的近 6 倍。\n\n"
+        "**本页故意不提供 trailing PE**：分母 net income 裹着减值/重组/诉讼和解/资产处置"
+        "（INTC 的 -188 亿大半是减值），一次性收支污染严重。**EV/EBITDA** 的 EBITDA 在这些"
+        "之上、EV 含净债务跨资本结构可比（三星的巨额净现金 PE 看不出来）；**P/S** 的营收几乎"
+        "不会被一次性项目污染，而且**周期股的盈利会翻符号、营收不会**（MU 的净利润两年前还是"
+        "-58 亿），是三者中唯一真正抗周期的。也不提供 P/B——回购能把净资产打到接近零"
+        "（STX 的 P/B 173 是会计残值不是估值信号）。\n\n"
+        "⚠️ 但 **EV/EBITDA 治得了一次性污染，治不了周期性**：峰值 EBITDA 一样给出低倍数。"
+        "存储三巨头两年前刚亏损过、现在盈利冲上历史高位，低倍数建立在这个刚创新高的分母上。"
+        "要判断「相对自身历史贵不贵」需要历史基本面序列，**我们只有 2026-07 起的快照，做不到**。\n\n"
         "🌏 **含非美龙头**（三星/SK海力士/中际旭创/东京电子/爱德万/鸿海等）："
         "它们的**市值已按最新汇率换算成美元**才参与统治力与合计市值计算（否则把万亿韩元与"
         "十亿美元相加是垃圾数字）；但**涨幅与 12-1 动量是本币计价收益**，与美元收益差一个"
@@ -2644,11 +2657,20 @@ def render_ai_infra():
             vp = value_pctile.get(s)
             # forward PE：取自基本面最新快照（TTM 快照口径，与本页增长指标的财年口径不同）。
             # 负值（亏损公司的 forward PE）置空——负 PE 在估值上无意义，留着会污染排序。
-            fpe = None
-            if s in latest_fund.index and "forward_pe" in latest_fund.columns:
-                _v = latest_fund.at[s, "forward_pe"]
-                if pd.notna(_v) and float(_v) > 0:
-                    fpe = float(_v)
+            # EV/EBITDA 与 P/S 同样取自最新快照，负值同样置空（负 EBITDA 的倍数无意义）。
+            # 这两个是**抗一次性收支污染**的口径，与市场筛选页价值分位同源：trailing PE
+            # 的分母 net income 裹着减值/重组/诉讼和解/资产处置（INTC 那 -188 亿大半是
+            # 减值），EBITDA 在这些之上、EV 含净债务跨资本结构可比（三星的巨额净现金
+            # PE 看不出来）。所以本页**故意不提供 trailing PE**。
+            def _pos(col: str) -> float | None:
+                if s not in latest_fund.index or col not in latest_fund.columns:
+                    return None
+                v = latest_fund.at[s, col]
+                return float(v) if pd.notna(v) and float(v) > 0 else None
+
+            fpe = _pos("forward_pe")
+            ev_ebitda = _pos("ev_to_ebitda")
+            ps = _pos("price_to_sales")
             detail_rows.append({
                 "代码": s,
                 "名称": names.get(s, s),
@@ -2668,6 +2690,8 @@ def render_ai_infra():
                 "12-1动量": mom_dict.get(s),
                 "近1月": returns_1m.get(s),
                 "forward PE": fpe,
+                "EV/EBITDA": ev_ebitda,
+                "P/S": ps,
                 "价值分位": vp,
                 # 价值分位为空时区分"池外无此指标"与"池内但缺数据"——数值列放不下这个
                 # 说明，单独一列标注，保证价值分位列仍可按数值排序
@@ -2694,8 +2718,9 @@ def render_ai_infra():
             display_detail, width="stretch", hide_index=True,
             column_config={
                 "市值": st.column_config.NumberColumn("市值($)", format="compact"),
-                # forward PE 是倍数不是百分比，单独格式化；越低越便宜
-                "forward PE": st.column_config.NumberColumn("forward PE", format="%.1f"),
+                # 估值三列是倍数不是百分比，单独格式化；越低越便宜
+                **{c: st.column_config.NumberColumn(c, format="%.1f")
+                   for c in ("forward PE", "EV/EBITDA", "P/S")},
                 **{c: st.column_config.NumberColumn(c, format="%+.1f%%")
                    for c in signed_cols if c in display_detail.columns},
                 **{c: st.column_config.NumberColumn(c, format="%.1f%%")
