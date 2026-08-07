@@ -218,3 +218,28 @@ class TestLaneShareWithMixedCurrencies:
         # MU should be around 10-15% (189B / ~2000B)
         assert shares["MU"] is not None
         assert shares["MU"] < 0.40  # 远低于之前的 64%
+
+
+# ── display_name：非美代码可读性 ──────────────────────────────
+
+def test_display_name_prefers_chinese_map():
+    from quant.analysis.ai_infra import display_name
+    # 纯数字代码必须给出中文名，否则页面上完全无法辨认
+    assert display_name("005930.KS") == "三星电子"
+    assert display_name("300308.SZ") == "中际旭创"
+    assert display_name("TSM") == "台积电"
+    # 中文名表优先于 yfinance 英文名
+    assert display_name("2317.TW", {"shortName": "HON HAI PRECISION"}) == "鸿海精密"
+
+
+def test_display_name_falls_back_to_yfinance_then_symbol():
+    from quant.analysis.ai_infra import display_name
+    # 不在中文表里 → 用 shortName
+    assert display_name("NVDA", {"shortName": "NVIDIA Corporation"}) == "NVIDIA Corporation"
+    # 无 shortName → longName
+    assert display_name("XYZ", {"longName": "Xyz Holdings Inc."}) == "Xyz Holdings Inc."
+    # 都没有 → 退回代码本身，不返回 None/空
+    assert display_name("XYZ", {}) == "XYZ"
+    assert display_name("XYZ", None) == "XYZ"
+    # 空字符串不算有效名字
+    assert display_name("XYZ", {"shortName": "", "longName": "  "}) == "XYZ"

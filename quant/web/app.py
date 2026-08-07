@@ -2406,6 +2406,7 @@ def render_ai_infra():
         compute_growth_metrics,
         compute_lane_market_share,
         compute_lane_summary,
+        display_name,
         get_currency_for_symbol,
         to_usd_market_cap,
     )
@@ -2474,8 +2475,9 @@ def render_ai_infra():
             else:
                 market_caps_local[s] = None
 
-        # 币种：优先取 fundamentals.raw_json 的 currency，兜底按交易所后缀推断
+        # 币种与显示名：都来自 fundamentals.raw_json，只解析一次
         currencies: dict[str, str] = {}
+        names: dict[str, str] = {}
         for s in all_syms:
             raw = None
             if not latest_fund.empty and s in latest_fund.index and "raw_json" in latest_fund.columns:
@@ -2486,6 +2488,7 @@ def render_ai_infra():
                     except (ValueError, TypeError):
                         raw = None
             currencies[s] = get_currency_for_symbol(s, raw)
+            names[s] = display_name(s, raw)
 
         # 汇率：prices 表里的 `XXX=X`（1 USD 兑多少本币），取最新收盘
         fx_rates: dict[str, float] = {}
@@ -2636,6 +2639,7 @@ def render_ai_infra():
                     fpe = float(_v)
             detail_rows.append({
                 "代码": s,
+                "名称": names.get(s, s),
                 "币种": currencies.get(s, "USD"),
                 "市值份额": shares.get(s),
                 "市值": mc,

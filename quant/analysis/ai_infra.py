@@ -131,6 +131,37 @@ SUFFIX_TO_CURRENCY: dict[str, str] = {
 }
 
 
+# 非美标的的中文名。美股代码（NVDA/MU…）本身可读，不做映射；但 `005930.KS`、`300308.SZ`
+# 这类纯数字代码完全无法辨认，而 yfinance 只给英文名（"Hon Hai Precision Industry"），
+# 对中文语境仍不够直观。只维护这一小张表（非美龙头），成本可忽略。
+CN_NAMES: dict[str, str] = {
+    "005930.KS": "三星电子",
+    "000660.KS": "SK海力士",
+    "300308.SZ": "中际旭创",
+    "8035.T": "东京电子",
+    "6857.T": "爱德万测试",
+    "2317.TW": "鸿海精密",
+    "TSM": "台积电",
+    "ASML": "阿斯麦",
+}
+
+
+def display_name(symbol: str, raw_json: dict | None = None) -> str:
+    """标的显示名：优先中文名表 → yfinance 的 shortName/longName → 代码本身。
+
+    返回的是**纯名字**（不含代码），调用方自行决定怎么跟代码组合展示。
+    """
+    if symbol in CN_NAMES:
+        return CN_NAMES[symbol]
+    if raw_json and isinstance(raw_json, dict):
+        for key in ("shortName", "longName"):
+            v = raw_json.get(key)
+            # 先 strip 再判空——纯空格的名字等同于没有，不能当有效值返回
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return symbol
+
+
 def infer_currency(symbol: str) -> str:
     """根据交易所后缀推断币种。无后缀或未知后缀默认 USD。"""
     for suffix, ccy in SUFFIX_TO_CURRENCY.items():
