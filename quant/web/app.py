@@ -2391,6 +2391,10 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
                   f"回撤阈值（{thr:.0%}）而已，调低上面的滑杆阈值能看到更多被计入「真实回撤」的段。")
 
 
+# AI 基建赛道概览里的百分比列（显示时 ×100，配 printf 格式；见 render_ai_infra 内注释）
+_AI_PCT_COLS = ["近1年涨幅(市值加权)", "12-1动量(市值加权)", "营收增长中位数"]
+
+
 def render_ai_infra():
     """🤖 AI 基建：按赛道细分的 AI 基建个股观察页面。
 
@@ -2527,23 +2531,24 @@ def render_ai_infra():
 
     overview_df = pd.DataFrame(lane_summaries)
     if not overview_df.empty:
-        fmt_overview = {}
-        if "合计市值" in overview_df.columns:
-            overview_df["合计市值"] = overview_df["合计市值"].apply(
-                lambda x: f"${x/1e12:.2f}T" if x and x >= 1e12
-                else (f"${x/1e9:.0f}B" if x else "—"))
-        if "近1年涨幅(市值加权)" in overview_df.columns:
-            fmt_overview["近1年涨幅(市值加权)"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
-        if "12-1动量(市值加权)" in overview_df.columns:
-            fmt_overview["12-1动量(市值加权)"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
-        if "营收增长中位数" in overview_df.columns:
-            fmt_overview["营收增长中位数"] = lambda x: f"{x:+.1%}" if pd.notna(x) else "—"
-
+        # 保留数值类型交给 column_config 做显示格式化——**不要**先 apply 成字符串，
+        # 否则点表头是按字典序排（"+1102.1%" 会排在 "+192.9%" 前面，因为第二位 '1'<'9'；
+        # 市值列 "$477B" 与 "$9.10T" 混排更是毫无意义）。
+        # 百分比列显示时 ×100 配 "%+.1f%%"：仍是数值（排序正确），且保住正负号与 1 位小数
+        # （内建的 format="percent" 会丢掉 "+" 号并强制 2 位小数）。
         display_ov = overview_df.copy()
-        for col, fn in fmt_overview.items():
-            if col in display_ov.columns:
-                display_ov[col] = display_ov[col].apply(fn)
-        st.dataframe(display_ov, width="stretch", hide_index=True)
+        for c in _AI_PCT_COLS:
+            if c in display_ov.columns:
+                display_ov[c] = display_ov[c] * 100
+        st.dataframe(
+            display_ov, width="stretch", hide_index=True,
+            column_config={
+                # compact 不支持 $ 前缀，把单位写进列名
+                "合计市值": st.column_config.NumberColumn("合计市值($)", format="compact"),
+                **{c: st.column_config.NumberColumn(c, format="%+.1f%%")
+                   for c in _AI_PCT_COLS if c in display_ov.columns},
+            },
+        )
 
     # ── 赛道明细 ──
     st.subheader("赛道明细")
@@ -2561,42 +2566,25 @@ def render_ai_infra():
             mc = market_caps.get(s)
             in_sp500 = s in sp500_syms_set
 
-            # CAGR 标注
-            cagr_str = "—"
-            if gm and gm.revenue_cagr is not None and gm.cagr_years is not None:
-                cagr_str = f"{gm.revenue_cagr:+.0%}（{gm.cagr_years}年）"
-
-            yoy_str = f"{gm.revenue_yoy:+.0%}" if gm and gm.revenue_yoy is not None else "—"
-            gm_str = f"{gm.gross_margin:.0%}" if gm and gm.gross_margin is not None else "—"
-            nm_str = f"{gm.net_margin:.0%}" if gm and gm.net_margin is not None else "—"
-
-            mom_val = mom_dict.get(s)
-            mom_str = f"{mom_val:+.0%}" if mom_val is not None else "—"
-
+            # 数值列一律保留原始数值（缺失=None），格式化交给 column_config，
+            # 否则点表头按字典序排。CAGR 的"几年"标注单独拆一列，既保住信息又不毁排序。
             vp = value_pctile.get(s)
-            if vp is not None:
-                vp_str = f"{vp:.0%}"
-            elif not in_sp500:
-                vp_str = "—（池外）"
-            else:
-                vp_str = "—"
-
-            share_val = shares.get(s)
-            share_str = f"{share_val:.0%}" if share_val is not None else "—"
-
-            mc_str = (f"${mc/1e12:.2f}T" if mc and mc >= 1e12
-                      else (f"${mc/1e9:.0f}B" if mc else "—"))
-
             detail_rows.append({
                 "代码": s,
-                "市值份额": share_str,
-                "市值": mc_str,
-                "营收CAGR": cagr_str,
-                "营收同比": yoy_str,
-                "毛利率": gm_str,
-                "净利率": nm_str,
-                "12-1动量": mom_str,
-                "价值分位": vp_str,
+                "市值份额": shares.get(s),
+                "市值": mc,
+                "营收CAGR": gm.revenue_cagr if gm else None,
+                "CAGR年数": (f"{gm.cagr_years}年"
+                             if gm and gm.cagr_years is not None else "—"),
+                "营收同比": gm.revenue_yoy if gm else None,
+                "毛利率": gm.gross_margin if gm else None,
+                "净利率": gm.net_margin if gm else None,
+                "12-1动量": mom_dict.get(s),
+                "价值分位": vp,
+                # 价值分位为空时区分"池外无此指标"与"池内但缺数据"——数值列放不下这个
+                # 说明，单独一列标注，保证价值分位列仍可按数值排序
+                "价值分位备注": ("" if vp is not None
+                                 else ("池外" if not in_sp500 else "缺数据")),
                 "S&P500": "✅" if in_sp500 else "❌",
             })
 
@@ -2607,14 +2595,30 @@ def render_ai_infra():
         if n_missing_cap:
             st.caption(f"⚠️ 本赛道有 {n_missing_cap} 只标的市值缺失，已从统治力分母中剔除。")
 
-        st.dataframe(detail_df, width="stretch", hide_index=True)
+        # 同概览表：百分比列 ×100 保数值排序 + 保住正负号；市值单位写进列名
+        display_detail = detail_df.copy()
+        signed_cols = ["营收CAGR", "营收同比", "12-1动量"]      # 可能为负，带 +/- 号
+        plain_cols = ["市值份额", "毛利率", "净利率", "价值分位"]  # 恒非负，不需要 + 号
+        for c in signed_cols + plain_cols:
+            if c in display_detail.columns:
+                display_detail[c] = display_detail[c] * 100
+        st.dataframe(
+            display_detail, width="stretch", hide_index=True,
+            column_config={
+                "市值": st.column_config.NumberColumn("市值($)", format="compact"),
+                **{c: st.column_config.NumberColumn(c, format="%+.1f%%")
+                   for c in signed_cols if c in display_detail.columns},
+                **{c: st.column_config.NumberColumn(c, format="%.1f%%")
+                   for c in plain_cols if c in display_detail.columns},
+            },
+        )
 
         # 池外标的说明
         pool_external = [s for s in lane_syms if s not in sp500_syms_set]
         if pool_external:
             st.caption(
                 f"💡 池外标的（{', '.join(pool_external)}）不在 S&P500 候选池中，"
-                f"无行业内价值分位——价值分位显示「—（池外）」。这是池外标的的已知代价，"
+                f"无行业内价值分位——价值分位为空、备注列标「池外」。这是池外标的的已知代价，"
                 f"不影响其他指标的准确性。"
             )
 
