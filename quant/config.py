@@ -33,6 +33,29 @@ class Config:
                 seen.setdefault(s)
         return list(seen)
 
+    @property
+    def ai_infra_symbols(self) -> list[str]:
+        """AI 基建观察池的全部标的（按 universe_ai_infra.yaml 去重保序）。"""
+        try:
+            return self.universe_symbols("universe_ai_infra.yaml")
+        except (OSError, KeyError, AttributeError):
+            # 兼容没有独立观察池文件的旧配置；当前配置会走上面的文件。
+            return list(dict.fromkeys(self.watchlist.get("ai_infra", [])))
+
+    @property
+    def research_symbols(self) -> list[str]:
+        """需要基本面/财报刷新的研究标的：S&P500 候选池 + AI 基建观察池。
+
+        行情更新仍由 ``update_symbols`` 控制；研究数据不能只跟随策略候选池，
+        否则 AI 页面里新增的池外公司会永远停留在旧快照。
+        """
+        seen: dict[str, None] = {}
+        for s in self.universe_symbols("universe_sp500.yaml"):
+            seen.setdefault(s)
+        for s in self.ai_infra_symbols:
+            seen.setdefault(s)
+        return list(seen)
+
     def symbols_for(self, groups: list[str]) -> list[str]:
         seen: dict[str, None] = {}
         for g in groups:

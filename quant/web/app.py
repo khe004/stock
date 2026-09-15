@@ -822,7 +822,7 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
         "回撤 -20.6%→-18.0%，且**两个半段的夏普都是全场第一**；`canary+aggressive+low_vol` 三件套"
         "相关最低(0.38)、夏普最高(1.03)；`canary+aggressive` 双腿杠铃 +454%/回撤-21.2%/Calmar0.75，"
         "**每一项都优于 SPY 长持**，但只有 2 个成分 = specification risk 最高。"
-        "注意 canary_mom 目前是 notify:false 仅观察，尚无样本外记录。"
+        "注意 canary_mom 虽已开启推送，但仍尚无样本外记录。"
     )
 
     # 买入持有型成分（如管理期货 DBMF）：不是策略、没有信号，作为独立收益腿并进来。
@@ -2123,8 +2123,10 @@ def render_market_screen():
         stock_prices = {s: store.load_prices(conn, s) for s in stock_syms}
         stock_prices = {s: df for s, df in stock_prices.items() if not df.empty}
         fdf = store.load_fundamentals(conn)
-        latest_fund = (fdf.sort_values("date").groupby("symbol").last()
+        latest_fund = (store.load_latest_fundamentals(conn)
                        if not fdf.empty else None)
+        if latest_fund is not None and not latest_fund.empty:
+            latest_fund = latest_fund.set_index("symbol")
         # 价值分行业内中性化：传入行业映射，消除科技高PE/银行低PE的结构性偏差
         stock_str = compute_strength(stock_prices, fundamentals=latest_fund, sectors=sec_map)
     if stock_str.empty:
@@ -2483,8 +2485,10 @@ def render_ai_infra():
 
         # 基本面（市值用）
         fdf = store.load_fundamentals(conn)
-        latest_fund = (fdf.sort_values("date").groupby("symbol").last()
+        latest_fund = (store.load_latest_fundamentals(conn)
                        if not fdf.empty else pd.DataFrame())
+        if not latest_fund.empty:
+            latest_fund = latest_fund.set_index("symbol")
 
         # 市值字典（**本币**，下面统一换算成美元）
         market_caps_local: dict[str, float | None] = {}
@@ -2567,23 +2571,27 @@ def render_ai_infra():
                  else None)
             rev_growth_q[s] = float(v) if v is not None and pd.notna(v) else None
 
-        # 12-1 动量（复用 selectors.momentum_return）
+        # 12-1 动量：每只股票按自己的有效交易日计算，不能把美/日韩/港股
+        # 不同交易日历先拼成并集再 shift，否则节假日会占掉窗口或制造 NaN。
         mom_dict: dict[str, float | None] = {}
-        adj_all = pd.DataFrame({s: price_series(df) for s, df in all_prices.items()}).sort_index()
-        if not adj_all.empty:
-            mom_df = momentum_return(adj_all, lookback=252, skip=21)
-            for s in all_syms:
-                if s in mom_df.columns:
-                    v = mom_df[s].iloc[-1] if not mom_df[s].dropna().empty else None
-                    mom_dict[s] = float(v) if v is not None and pd.notna(v) else None
-                else:
-                    mom_dict[s] = None
+        for s in all_syms:
+            adj = price_series(all_prices[s]).dropna() if s in all_prices else pd.Series(dtype=float)
+            if len(adj) >= 253:
+                v = adj.iloc[-1 - 21] / adj.iloc[-1 - 252] - 1
+                mom_dict[s] = float(v) if pd.notna(v) else None
+            else:
+                mom_dict[s] = None
 
         # 价值分位（复用 screening.compute_strength 的行业内中性化逻辑）
         sp500_map = _stock_sector_map()
         sp500_syms_set = set(sp500_map.keys())
-        # 只对 S&P500 内的标的算价值分位
-        sp500_prices = {s: all_prices[s] for s in all_syms if s in sp500_syms_set and s in all_prices}
+        # 价值分位的母集使用完整 S&P500 候选池；AI 页只展示其中的 AI 成分，
+        # 否则会把“AI 池内同业分位”误称为全行业分位。
+        sp500_prices = {
+            s: store.load_prices(conn, s)
+            for s in sp500_syms_set
+        }
+        sp500_prices = {s: df for s, df in sp500_prices.items() if not df.empty}
         value_pctile: dict[str, float | None] = {}
         if sp500_prices and not latest_fund.empty:
             strength = compute_strength(sp500_prices, fundamentals=latest_fund, sectors=sp500_map)
@@ -2613,6 +2621,11 @@ def render_ai_infra():
                                         returns_3y=returns_3y,
                                         returns_5y=returns_5y,
                                         revenue_growth_q=rev_growth_q)
+        summary["市值覆盖数"] = sum(market_caps.get(s) is not None for s in lane_syms)
+        summary["基本面覆盖数"] = sum(s in latest_fund.index for s in lane_syms)
+        summary["财报覆盖数"] = sum(
+            not fin_df[fin_df["symbol"] == s].empty for s in lane_syms
+        ) if not fin_df.empty else 0
         lane_summaries.append(summary)
 
     overview_df = pd.DataFrame(lane_summaries)
@@ -2651,6 +2664,14 @@ def render_ai_infra():
             gm = growth_metrics.get(s)
             mc = market_caps.get(s)
             in_sp500 = s in sp500_syms_set
+            price_df = all_prices.get(s, pd.DataFrame())
+            price_valid = price_df["close"].dropna() if not price_df.empty else pd.Series(dtype=float)
+            price_date = (price_valid.index[-1].strftime("%Y-%m-%d")
+                          if not price_valid.empty else None)
+            fund_date = (str(latest_fund.at[s, "date"])
+                         if s in latest_fund.index and "date" in latest_fund.columns else None)
+            fin_dates = fin_df.loc[fin_df["symbol"] == s, "fiscal_date"] if not fin_df.empty else pd.Series(dtype=object)
+            fin_date = str(fin_dates.max()) if not fin_dates.empty else None
 
             # 数值列一律保留原始数值（缺失=None），格式化交给 column_config，
             # 否则点表头按字典序排。CAGR 的"几年"标注单独拆一列，既保住信息又不毁排序。
@@ -2675,6 +2696,9 @@ def render_ai_infra():
                 "代码": s,
                 "名称": names.get(s, s),
                 "币种": currencies.get(s, "USD"),
+                "行情日期": price_date or "—",
+                "基本面日期": fund_date or "—",
+                "最新财报期": fin_date or "—",
                 "市值份额": shares.get(s),
                 "市值": mc,
                 "营收CAGR": gm.revenue_cagr if gm else None,
@@ -2727,6 +2751,102 @@ def render_ai_infra():
                    for c in plain_cols if c in display_detail.columns},
             },
         )
+
+        missing_research = [
+            s for s in lane_syms
+            if s not in latest_fund.index or s not in set(fin_df["symbol"]) if not fin_df.empty
+        ] if not fin_df.empty else [s for s in lane_syms if s not in latest_fund.index]
+        if missing_research:
+            st.caption("⚠️ 研究数据未完整覆盖：" + "、".join(missing_research)
+                       + "。空值会保留为空，不会用旧快照补填。")
+
+        # ── 公司详情（研究首版）──
+        # 表格负责横向发现，详情负责沿着一家公司继续核对数据；两者共享同一批
+        # 已加载的行情/快照/财报，避免详情页重新抓取或悄悄使用另一套口径。
+        st.subheader("公司详情")
+        detail_symbol = st.selectbox(
+            "选择公司查看详情", lane_syms, key="ai_infra_symbol",
+            format_func=lambda x: f"{names.get(x, x)}（{x}）",
+        )
+        if detail_symbol:
+            detail_price = all_prices.get(detail_symbol, pd.DataFrame())
+            detail_fin = (fin_df[fin_df["symbol"] == detail_symbol]
+                          .sort_values("fiscal_date") if not fin_df.empty else pd.DataFrame())
+            has_fund = detail_symbol in latest_fund.index
+            fund_row = latest_fund.loc[detail_symbol] if has_fund else None
+
+            st.caption(
+                "赛道：" + "、".join(name for name, symbols in lanes.items()
+                                     if detail_symbol in symbols)
+                + "。本页仍是研究观察，不产生交易信号。"
+            )
+            metric_cols = st.columns(6)
+
+            def _metric_text(value, fmt: str = "") -> str:
+                if value is None or pd.isna(value):
+                    return "—"
+                return format(value, fmt) if fmt else str(value)
+
+            last_close = None
+            price_date = None
+            if not detail_price.empty:
+                valid_close = detail_price["close"].dropna()
+                if not valid_close.empty:
+                    last_close = float(valid_close.iloc[-1])
+                    price_date = valid_close.index[-1].strftime("%Y-%m-%d")
+            metric_cols[0].metric("最新收盘价", _metric_text(last_close, ".2f"))
+            metric_cols[1].metric("12-1动量", _metric_text(mom_dict.get(detail_symbol), "+.1%"))
+            metric_cols[2].metric("市值（美元）", _metric_text(market_caps.get(detail_symbol), ",.3g"))
+            metric_cols[3].metric("forward PE", _metric_text(
+                fund_row.get("forward_pe") if fund_row is not None else None, ".1f"))
+            metric_cols[4].metric("EV/EBITDA", _metric_text(
+                fund_row.get("ev_to_ebitda") if fund_row is not None else None, ".1f"))
+            metric_cols[5].metric("P/S", _metric_text(
+                fund_row.get("price_to_sales") if fund_row is not None else None, ".1f"))
+
+            fund_date = fund_row.get("date") if fund_row is not None else None
+            captured_at = fund_row.get("captured_at") if fund_row is not None else None
+            st.caption(
+                f"行情日期：{price_date or '无'}；基本面观察日：{fund_date or '无'}；"
+                f"抓取时间：{captured_at or '无'}；财报币种/证券币种可能不同，当前金额不跨币种相加。"
+            )
+
+            if not detail_price.empty:
+                chart_df = detail_price[[c for c in ("close", "adj_close")
+                                        if c in detail_price.columns]].dropna(how="all").tail(756)
+                if not chart_df.empty:
+                    fig = go.Figure()
+                    if "close" in chart_df:
+                        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["close"],
+                                                 mode="lines", name="收盘价"))
+                    if "adj_close" in chart_df:
+                        fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df["adj_close"],
+                                                 mode="lines", name="复权价", visible="legendonly"))
+                    fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10),
+                                      yaxis_title=f"价格（{currencies.get(detail_symbol, 'USD')}）")
+                    st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("**年度经营趋势**")
+            if detail_fin.empty:
+                st.info("暂无年度财报记录；运行研究数据更新后再查看。")
+            else:
+                fin_display = detail_fin[[c for c in (
+                    "fiscal_date", "revenue", "gross_profit", "operating_income", "net_income"
+                ) if c in detail_fin.columns]].copy()
+                fin_display = fin_display.rename(columns={
+                    "fiscal_date": "财年结束日", "revenue": "营收",
+                    "gross_profit": "毛利", "operating_income": "营业利润", "net_income": "净利润",
+                })
+                st.dataframe(fin_display, width="stretch", hide_index=True)
+                latest_gm = growth_metrics.get(detail_symbol)
+                if latest_gm:
+                    st.caption(
+                        f"年度营收 CAGR：{_metric_text(latest_gm.revenue_cagr, '+.1%')}"
+                        f"（{latest_gm.cagr_years or '—'} 年）；"
+                        f"最近连续财年营收同比：{_metric_text(latest_gm.revenue_yoy, '+.1%')}；"
+                        f"最新财年毛利率/净利率：{_metric_text(latest_gm.gross_margin, '.1%')} / "
+                        f"{_metric_text(latest_gm.net_margin, '.1%')}。"
+                    )
 
         # CAGR 断崖说明：只有本赛道真有标的被标记时才出现，避免刷屏
         broken = [r["代码"] for r in detail_rows if r["CAGR备注"]]

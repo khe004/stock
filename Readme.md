@@ -66,13 +66,15 @@ python run_daily.py --no-notify         # 只入库不推送
 python run_daily.py --full-refresh      # 全量重拉行情（复权价随分红回溯变化，建议每季度一次）
 python run_daily.py --backfill          # 把各策略全量历史信号补入库（标记已通知不推送），初始化信号历史
 
-streamlit run quant/web/app.py          # 打开复盘面板
+streamlit run quant/web/app.py          # 打开复盘面板（含 AI 基建公司详情）
 python -m pytest tests/                 # 跑单元测试
+# 只刷新基本面与 AI 基建财报，不拉行情、不跑策略、不发通知
+python run_daily.py --research-only
 ```
 
 ## 配置
 
-`config.yaml` 里改 watchlist（按组：大盘 / 行业 / 主题 / 资产类 / 现金 / 哨兵 / 防守 / 跨资产 / 进攻成长 等 15 组）、策略参数与作用组、通知开关、以及 `model_portfolio.strategies`（相关性页推荐配方的默认成分）。当前覆盖约 46 只 ETF / 个股候选，全部可随时增删。
+`config.yaml` 里改 watchlist（按组：大盘 / 行业 / 主题 / 资产类 / 现金 / 哨兵 / 防守 / 跨资产 / 进攻成长 / AI 基建 等 15 组）、策略参数与作用组、通知开关、以及 `model_portfolio.strategies`（相关性页推荐配方的默认成分）。AI 基建观察池单独维护在 `universe_ai_infra.yaml`，可随时增删。
 
 ## 目录
 
@@ -87,7 +89,7 @@ quant/strategies/   11 个策略（base + 各策略；REGISTRY 注册）
 quant/backtest/     回测引擎（单标的 / 组合轮动 / 定投 / 波动率缩放）
 quant/analysis/     纯计算：market / scoring / screening / correlation / robustness / drawdowns
 quant/notify/       Telegram + 邮件推送
-quant/web/app.py    Streamlit 十页面板
+quant/web/app.py    Streamlit 十一页面板
 tests/              单元测试
 scripts/            macOS 部署与快捷入口
 ```

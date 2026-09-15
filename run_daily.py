@@ -111,7 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-fundamentals", action="store_true",
                         help="跳过基本面抓取")
     parser.add_argument("--fundamentals-only", action="store_true",
-                        help="只抓基本面然后退出（用于单独补抓）")
+                        help="只更新基本面与年度财报然后退出（用于单独补抓）")
+    parser.add_argument("--research-only", action="store_true",
+                        help="只更新研究数据（--fundamentals-only 的明确别名）")
     args = parser.parse_args(argv)
 
     setup_logging()
@@ -119,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
     conn = store.connect(cfg.db_path)
 
     failed: list[str] = []
-    if not args.no_fetch:
+    research_only = args.fundamentals_only or args.research_only
+    if not args.no_fetch and not research_only:
         symbols = cfg.update_symbols
         log.info("%s %d 个标的行情…", "全量重拉" if args.full_refresh else "更新", len(symbols))
         total, failed = fetcher.update_all(conn, symbols, cfg.history_start,
@@ -127,29 +130,31 @@ def main(argv: list[str] | None = None) -> int:
         log.info("行情更新完成，共写入 %d 行，失败 %d 个", total, len(failed))
 
     # ── 基本面快照 ──
-    run_fundamentals = (not args.no_fetch and not args.no_fundamentals) or args.fundamentals_only
+    run_fundamentals = (not args.no_fetch and not args.no_fundamentals) or research_only
     if run_fundamentals:
         try:
-            fund_symbols = cfg.universe_symbols("universe_sp500.yaml")
-            as_of_fund = args.date or _date.today().isoformat()
+            # 基本面快照的 date 是实际观察/抓取日；--date 只控制信号补跑，
+            # 不能把今天拿到的 Yahoo info 伪装成历史已知数据。
+            fund_symbols = cfg.research_symbols
+            as_of_fund = _date.today().isoformat()
             log.info("抓取 %d 个个股基本面快照…", len(fund_symbols))
             fund_ok, fund_fail = fetcher.update_fundamentals(conn, fund_symbols, as_of_fund)
             log.info("基本面更新完成：成功 %d，失败 %d", fund_ok, len(fund_fail))
         except Exception:  # noqa: BLE001
             log.error("基本面抓取整体异常，不影响信号主流程", exc_info=True)
-    if args.fundamentals_only:
-        return 0
-
     # ── 年度财报（AI 基建页增长指标用）──
-    run_financials = (not args.no_fetch and not args.no_fundamentals) or args.fundamentals_only
+    run_financials = (not args.no_fetch and not args.no_fundamentals) or research_only
     if run_financials:
         try:
-            ai_infra_syms = cfg.universe_symbols("universe_ai_infra.yaml")
+            ai_infra_syms = cfg.ai_infra_symbols
             log.info("抓取 %d 个 AI 基建标的年度财报…", len(ai_infra_syms))
             fin_ok, fin_fail = fetcher.update_financials(conn, ai_infra_syms)
             log.info("财报更新完成：成功 %d，失败 %d", fin_ok, len(fin_fail))
         except Exception:  # noqa: BLE001
             log.error("财报抓取整体异常，不影响信号主流程", exc_info=True)
+
+    if research_only:
+        return 0
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}

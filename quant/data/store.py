@@ -298,6 +298,36 @@ def load_fundamentals(
     return pd.read_sql_query(query, conn, params=params)
 
 
+def load_latest_fundamentals(
+    conn: sqlite3.Connection,
+    symbols: list[str] | None = None,
+) -> pd.DataFrame:
+    """按 symbol 返回完整的最新基本面快照行。
+
+    不使用 ``groupby().last()``：pandas 会逐列跳过空值，把新快照的日期
+    和旧快照的估值拼在一起。这里按主键日期选整行，缺失字段保持缺失。
+    """
+    params: list = []
+    where = ""
+    if symbols:
+        placeholders = ",".join("?" for _ in symbols)
+        where = f"WHERE symbol IN ({placeholders})"
+        params.extend(symbols)
+    query = f"""
+        SELECT f.*
+        FROM fundamentals AS f
+        JOIN (
+            SELECT symbol, MAX(date) AS date
+            FROM fundamentals
+            {where}
+            GROUP BY symbol
+        ) AS latest
+          ON latest.symbol = f.symbol AND latest.date = f.date
+        ORDER BY f.symbol
+    """
+    return pd.read_sql_query(query, conn, params=params)
+
+
 def upsert_financials(conn: sqlite3.Connection, symbol: str,
                       rows: list[tuple]) -> int:
     """写入年度财报数据。rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income, captured_at), ...]。

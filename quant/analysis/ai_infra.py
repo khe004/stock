@@ -79,24 +79,31 @@ def compute_growth_metrics(fin_df: pd.DataFrame, symbol: str) -> GrowthMetrics:
         # 只有 1 期或 0 期，无法算增长
         return result
 
-    # 营收最近一年同比
+    # 营收最近一年同比。若中间缺了财年，不能把两年变化冒充单年同比。
     latest_rev = float(rev_rows.iloc[-1]["revenue"])
     prev_rev = float(rev_rows.iloc[-2]["revenue"])
-    if prev_rev > 0:
+    latest_date = pd.Timestamp(rev_rows.iloc[-1]["fiscal_date"])
+    prev_date = pd.Timestamp(rev_rows.iloc[-2]["fiscal_date"])
+    if prev_rev > 0 and _fiscal_year_gap(prev_date, latest_date) == 1:
         result.revenue_yoy = latest_rev / prev_rev - 1
 
-    # 营收 CAGR：尝试 3 年，不足则降级
-    n_periods = len(rev_rows)
-    target_years = 3
-    actual_years = min(target_years, n_periods - 1)
-
-    if actual_years >= 1:
-        start_rev = float(rev_rows.iloc[-1 - actual_years]["revenue"])
+    # 营收 CAGR：目标 3 个日历年；缺年时按实际 fiscal_date 年数计算。
+    # 不能用「有效记录条数 - 1」当年份：2022→2024 只有两条记录，但应是 2 年 CAGR。
+    end_date = pd.Timestamp(rev_rows.iloc[-1]["fiscal_date"])
+    candidates = []
+    for i in range(len(rev_rows) - 1):
+        start_date = pd.Timestamp(rev_rows.iloc[i]["fiscal_date"])
+        year_gap = _fiscal_year_gap(start_date, end_date)
+        if year_gap >= 1:
+            candidates.append((abs(year_gap - 3), year_gap, i, start_date))
+    if candidates:
+        _, actual_years, start_i, _ = min(candidates, key=lambda item: (item[0], -item[1]))
+        start_rev = float(rev_rows.iloc[start_i]["revenue"])
         end_rev = float(rev_rows.iloc[-1]["revenue"])
         if start_rev > 0 and end_rev > 0:
             result.revenue_cagr = (end_rev / start_rev) ** (1 / actual_years) - 1
             result.cagr_years = actual_years
-            result.cagr_break = _worst_yoy_drop(rev_rows.iloc[-1 - actual_years:])
+            result.cagr_break = _worst_yoy_drop(rev_rows.iloc[start_i:])
 
     return result
 
@@ -110,12 +117,31 @@ CAGR_BREAK_THRESHOLD = -0.40
 
 def _worst_yoy_drop(rev_rows: pd.DataFrame) -> float | None:
     """CAGR 窗口内最大的单年营收跌幅；没有超过阈值的断崖则返回 None。"""
-    revs = [float(v) for v in rev_rows["revenue"]]
-    drops = [revs[i] / revs[i - 1] - 1 for i in range(1, len(revs)) if revs[i - 1] > 0]
+    drops = []
+    rows = list(rev_rows.itertuples(index=False))
+    for prev, curr in zip(rows, rows[1:]):
+        prev_date = pd.Timestamp(getattr(prev, "fiscal_date"))
+        curr_date = pd.Timestamp(getattr(curr, "fiscal_date"))
+        # 只把连续财年间的变化标为单年断崖；跨年缺口另由 cagr_years 暴露。
+        if _fiscal_year_gap(prev_date, curr_date) != 1:
+            continue
+        prev_rev = float(getattr(prev, "revenue"))
+        curr_rev = float(getattr(curr, "revenue"))
+        if prev_rev > 0:
+            drops.append(curr_rev / prev_rev - 1)
     if not drops:
         return None
     worst = min(drops)
     return worst if worst <= CAGR_BREAK_THRESHOLD else None
+
+
+def _fiscal_year_gap(start: pd.Timestamp, end: pd.Timestamp) -> int:
+    """把财年结束日间隔换算成最接近的完整年数。
+
+    财年可能落在不同月份，单看 ``end.year - start.year`` 会把
+    2023-12-31→2025-01-01 误判成两年；按天数四舍五入更贴近实际报告期间。
+    """
+    return max(0, int(round((end - start).days / 365.25)))
 
 
 def _is_nan(v) -> bool:

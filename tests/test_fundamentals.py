@@ -5,12 +5,21 @@ from datetime import datetime, timezone
 
 import quant.data.fetcher as fetcher
 from quant.data import store
+from quant.config import load_config
 
 
 # ---------- fixture ----------
 
 def make_conn():
     return store.connect(":memory:")
+
+
+def test_research_symbols_include_sp500_and_ai_pool():
+    """研究数据刷新名单覆盖策略候选池之外的 AI 基建公司。"""
+    cfg = load_config()
+    symbols = set(cfg.research_symbols)
+    assert {"NVDA", "AMKR", "005930.KS", "300308.SZ"} <= symbols
+    assert set(cfg.ai_infra_symbols) >= {"AMKR", "TSM", "005930.KS"}
 
 
 FAKE_INFO = {
@@ -84,6 +93,21 @@ def test_load_fundamentals_filters():
     assert len(store.load_fundamentals(conn, symbol="AAPL")) == 2
     # 按 start
     assert len(store.load_fundamentals(conn, start="2026-07-15")) == 2
+
+
+def test_load_latest_fundamentals_keeps_latest_row_nulls():
+    """最新快照按整行读取，不能用旧快照的非空字段拼接。"""
+    conn = make_conn()
+    store.upsert_fundamentals(conn, "AAPL", "2026-07-17", "t1",
+                               {"forward_pe": 20.0, "market_cap": 100.0}, {})
+    store.upsert_fundamentals(conn, "AAPL", "2026-07-18", "t2",
+                               {"forward_pe": None, "market_cap": 110.0}, {})
+    latest = store.load_latest_fundamentals(conn)
+    assert len(latest) == 1
+    row = latest.iloc[0]
+    assert row["date"] == "2026-07-18"
+    assert pd.isna(row["forward_pe"])
+    assert row["market_cap"] == 110.0
 
 
 # ---------- fetcher 测试 ----------

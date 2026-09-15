@@ -570,6 +570,19 @@ class TestAiInfraGrowth:
         assert m.cagr_years == 2  # 标注为 2 年，不是 3 年
         assert m.revenue_cagr == pytest.approx(1.0, abs=0.001)  # (400/100)^(1/2)-1 = 1.0
 
+    def test_cagr_uses_fiscal_year_gap_when_year_is_missing(self):
+        """中间缺财年时，CAGR 的指数使用报告期实际相隔年数。"""
+        from quant.analysis.ai_infra import compute_growth_metrics
+        df = _fin_df([
+            ("2022-12-31", 100, 50, 10),
+            ("2024-12-31", 121, 60, 12),
+        ])
+        m = compute_growth_metrics(df, "GAP")
+        assert m.cagr_years == 2
+        assert m.revenue_cagr == pytest.approx(0.10, abs=0.001)
+        # 跨两年缺口不能伪装成最近一年同比。
+        assert m.revenue_yoy is None
+
     def test_cagr_break_flags_spinoff(self):
         """WDC 场景：窗口内营收断崖（分拆）→ cagr_break 记录最大跌幅。"""
         from quant.analysis.ai_infra import compute_growth_metrics
