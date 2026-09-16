@@ -141,7 +141,7 @@ def fetch_fundamentals(symbol: str) -> dict | None:
 
 
 def update_fundamentals(conn, symbols: list[str], as_of_date: str,
-                        stale_days: int = 7) -> tuple[int, list[str]]:
+                        stale_days: int = 7, report: dict | None = None) -> tuple[int, list[str]]:
     """批量更新基本面快照。每个 symbol 若最近 stale_days 天内已有记录则跳过（自限流）。
 
     返回 (成功数, 失败列表)。单个失败只记日志，不中断批量。"""
@@ -152,17 +152,23 @@ def update_fundamentals(conn, symbols: list[str], as_of_date: str,
         latest = store.latest_fundamentals_date(conn, symbol)
         if latest and latest >= cutoff:
             log.debug("%s 基本面已是最新（%s），跳过", symbol, latest)
+            if report is not None:
+                report[symbol] = ("skipped", f"最近快照 {latest}")
             continue
         result = fetch_fundamentals(symbol)
         if result is None:
             log.error("%s 基本面抓取失败，跳过", symbol)
             failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", "供应商返回空或请求失败")
             continue
         captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         store.upsert_fundamentals(conn, symbol, as_of_date, captured_at,
                                   result["metrics"], result["raw"])
         log.info("%s 基本面快照已更新 (date=%s)", symbol, as_of_date)
         ok_count += 1
+        if report is not None:
+            report[symbol] = ("updated", f"快照 {as_of_date}")
     return ok_count, failed
 
 
@@ -192,7 +198,7 @@ def fetch_financials(symbol: str) -> pd.DataFrame | None:
 
 
 def update_financials(conn, symbols: list[str],
-                      stale_days: int = 30) -> tuple[int, list[str]]:
+                      stale_days: int = 30, report: dict | None = None) -> tuple[int, list[str]]:
     """批量更新年度财报。每个 symbol 若最近 stale_days 天内已有拉取记录则跳过（自限流）。
 
     返回 (成功数, 失败列表)。单个失败只记日志，不中断批量。"""
@@ -203,11 +209,15 @@ def update_financials(conn, symbols: list[str],
         latest = store.latest_financial_date(conn, symbol)
         if latest and latest >= cutoff:
             log.debug("%s 财报已是最新（captured_at=%s），跳过", symbol, latest)
+            if report is not None:
+                report[symbol] = ("skipped", f"最近抓取 {latest}")
             continue
         stmt = fetch_financials(symbol)
         if stmt is None:
             log.error("%s 财报抓取失败，跳过", symbol)
             failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", "供应商返回空或请求失败")
             continue
         captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         rows = []
@@ -233,4 +243,9 @@ def update_financials(conn, symbols: list[str],
             store.upsert_financials(conn, symbol, rows)
             log.info("%s 财报已更新（%d 期）", symbol, len(rows))
             ok_count += 1
+            if report is not None:
+                report[symbol] = ("updated", f"写入 {len(rows)} 期")
+        elif report is not None:
+            report[symbol] = ("failed", "财报没有可写入的报告期")
+            failed.append(symbol)
     return ok_count, failed

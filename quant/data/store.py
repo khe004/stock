@@ -86,6 +86,17 @@ CREATE TABLE IF NOT EXISTS financials (
 );
 """
 
+SCHEMA_RESEARCH_UPDATES = """
+CREATE TABLE IF NOT EXISTS research_updates (
+    symbol TEXT NOT NULL,
+    data_type TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT,
+    PRIMARY KEY (symbol, data_type)
+);
+"""
+
 
 # 迁移用：两张表的期望列。老版本库（早期在用户机器上重建过的 schema）可能缺列
 PRICES_COL_TYPES = {
@@ -142,8 +153,27 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.executescript(SCHEMA)
     conn.executescript(SCHEMA_FUNDAMENTALS)
     conn.executescript(SCHEMA_FINANCIALS)
+    conn.executescript(SCHEMA_RESEARCH_UPDATES)
     _migrate(conn)
     return conn
+
+
+def record_research_update(conn: sqlite3.Connection, symbol: str, data_type: str,
+                           status: str, detail: str | None = None) -> None:
+    checked_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute("""INSERT OR REPLACE INTO research_updates
+        (symbol, data_type, checked_at, status, detail) VALUES (?, ?, ?, ?, ?)""",
+        (symbol, data_type, checked_at, status, detail))
+    conn.commit()
+
+
+def load_research_updates(conn: sqlite3.Connection, symbols: list[str]) -> pd.DataFrame:
+    if not symbols:
+        return pd.DataFrame(columns=["symbol", "data_type", "checked_at", "status", "detail"])
+    placeholders = ",".join("?" for _ in symbols)
+    return pd.read_sql_query(
+        f"SELECT * FROM research_updates WHERE symbol IN ({placeholders})",
+        conn, params=symbols)
 
 
 def upsert_prices(conn: sqlite3.Connection, symbol: str, df: pd.DataFrame) -> int:

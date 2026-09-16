@@ -114,14 +114,58 @@ def main(argv: list[str] | None = None) -> int:
                         help="只更新基本面与年度财报然后退出（用于单独补抓）")
     parser.add_argument("--research-only", action="store_true",
                         help="只更新研究数据（--fundamentals-only 的明确别名）")
+    parser.add_argument("--symbols", nargs="+", metavar="SYMBOL",
+                        help="研究更新指定标的；仅可用于 --research-only")
+    parser.add_argument("--research-data", choices=("all", "fundamentals", "financials"),
+                        default="all", help="研究更新的数据类型（默认 all）")
+    parser.add_argument("--force", action="store_true", help="研究更新忽略刷新间隔")
     args = parser.parse_args(argv)
+
+    research_only = args.fundamentals_only or args.research_only
+    if not research_only and (args.symbols or args.research_data != "all" or args.force):
+        parser.error("--symbols/--research-data/--force 仅可用于 --research-only")
+    if research_only and (args.no_fetch or args.no_fundamentals):
+        parser.error("研究更新与 --no-fetch/--no-fundamentals 冲突")
 
     setup_logging()
     cfg = load_config()
     conn = store.connect(cfg.db_path)
 
+    if research_only:
+        requested = list(dict.fromkeys(s.upper() for s in args.symbols)) if args.symbols else None
+        allowed = set(cfg.research_symbols)
+        unknown = sorted(set(requested or []) - allowed)
+        if unknown:
+            parser.error("标的不在研究观察池：" + ", ".join(unknown))
+        jobs = []
+        if args.research_data in ("all", "fundamentals"):
+            jobs.append(("fundamentals", requested or cfg.research_symbols))
+        if args.research_data in ("all", "financials"):
+            fin_symbols = [s for s in (requested or cfg.ai_infra_symbols)
+                           if s in set(cfg.ai_infra_symbols)]
+            if requested and not fin_symbols:
+                parser.error("指定标的均不在 AI 财报观察池")
+            jobs.append(("financials", fin_symbols))
+        any_failed = False
+        for data_type, symbols in jobs:
+            report: dict[str, tuple[str, str]] = {}
+            if data_type == "fundamentals":
+                fetcher.update_fundamentals(conn, symbols, _date.today().isoformat(),
+                                            stale_days=-1 if args.force else 7, report=report)
+            else:
+                fetcher.update_financials(conn, symbols,
+                                          stale_days=-1 if args.force else 30, report=report)
+            for symbol, (status, detail) in report.items():
+                store.record_research_update(conn, symbol, data_type, status, detail)
+                log.info("研究更新 %s %s: %s (%s)", data_type, symbol, status, detail)
+            counts = {status: sum(v[0] == status for v in report.values())
+                      for status in ("updated", "skipped", "failed")}
+            log.info("%s: 更新 %d / 跳过 %d / 失败 %d", data_type,
+                     counts["updated"], counts["skipped"], counts["failed"])
+            any_failed |= counts["failed"] > 0
+        return 1 if any_failed else 0
+
     failed: list[str] = []
-    research_only = args.fundamentals_only or args.research_only
     if not args.no_fetch and not research_only:
         symbols = cfg.update_symbols
         log.info("%s %d 个标的行情…", "全量重拉" if args.full_refresh else "更新", len(symbols))
@@ -152,9 +196,6 @@ def main(argv: list[str] | None = None) -> int:
             log.info("财报更新完成：成功 %d，失败 %d", fin_ok, len(fin_fail))
         except Exception:  # noqa: BLE001
             log.error("财报抓取整体异常，不影响信号主流程", exc_info=True)
-
-    if research_only:
-        return 0
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}

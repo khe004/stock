@@ -1170,7 +1170,7 @@ def _render_robustness(strategy_name: str, params: dict,
         )
         if len(prices) > 50:
             st.warning(f"本策略宇宙有 {len(prices)} 只标的，跑 4 遍可能要一分钟以上，请耐心等待。")
-        key = f"robust_{strategy_name}"
+        key = f"robust_v2_{strategy_name}"
         if st.button("跑稳健性检验", key=f"btn_{key}"):
             with st.spinner("正在按 4 个调仓日与各分段重跑…"):
                 st.session_state[key] = robustness_report(
@@ -1210,7 +1210,8 @@ def _render_robustness(strategy_name: str, params: dict,
                    if rep["defensive_symbols"] else "")
         rng = rep["excess_range"]
         st.caption(
-            f"★池子等权 = 与策略共享候选名单的等权持有（{pool_txt}{def_txt}），"
+            f"★池子等权 = 与策略共享候选名单，首日等额买入后持有、扣同一买入成本"
+            f"（{pool_txt}{def_txt}）；分段承接此前持仓，按各窗口起点归一化。"
             "是判断「选择有没有加信息」的公平对照。**别拿 SPY/QQQ/XLK 这类事后赢家当基准。**"
             + (f"\n\n**期望区间：分段超额年化 {rng[0]:+.1%} ~ {rng[1]:+.1%}。**"
                "点估计取区间内的中间水平而不是最大值；最坏那一段是你真的要扛的东西——"
@@ -2413,6 +2414,7 @@ def render_ai_infra():
         to_usd_market_cap,
     )
     from quant.strategies.selectors import momentum_return
+    from quant.analysis.research_status import research_status
 
     st.title("🤖 AI 基建")
 
@@ -2472,6 +2474,25 @@ def render_ai_infra():
         for s in syms:
             all_syms_set.setdefault(s)
     all_syms = list(all_syms_set)
+
+    status_df = research_status(conn, all_syms)
+    st.subheader("研究数据状态")
+    status_cols = st.columns(3)
+    for col, label in zip(status_cols, ("行情日期", "基本面日期", "财报抓取时间")):
+        covered = int(status_df[label].notna().sum())
+        overdue = int((status_df[label + "状态"] == "过期").sum())
+        col.metric(label.replace("日期", "").replace("抓取时间", "") + "覆盖",
+                   f"{covered}/{len(all_syms)}", help=f"过期 {overdue} 只")
+    problem = status_df[
+        (status_df[["行情日期状态", "基本面日期状态", "财报抓取时间状态"]] != "正常").any(axis=1)
+        | (status_df.get("基本面更新结果", pd.Series(index=status_df.index)) == "failed")
+        | (status_df.get("财报更新结果", pd.Series(index=status_df.index)) == "failed")
+    ]
+    with st.expander(f"缺失、过期与最近失败（{len(problem)} 只）"):
+        st.caption("行情超过 7 天、基本面超过 7 天、财报抓取超过 30 天标为过期；"
+                   "财报抓取时间不是财报发布日。失败原因仅记录最近一次研究更新。")
+        st.dataframe(problem, width="stretch", hide_index=True)
+        st.caption("刷新示例：python run_daily.py --research-only --symbols NVDA --force")
 
     # ── 加载数据 ──
     with st.spinner("加载行情、基本面和财报数据…"):

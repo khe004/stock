@@ -54,8 +54,9 @@ def defensive_symbols(params: dict) -> set[str]:
 
 
 def equal_weight_equity(prices: dict[str, pd.DataFrame], initial_cash: float,
-                        subset: set[str] | None = None) -> pd.Series | None:
-    """等权基准：宇宙内标的每日等权持有（日度再平衡，不计成本）。
+                        subset: set[str] | None = None,
+                        cost_bps: float = 0.0) -> pd.Series | None:
+    """等权基准：首日等额买入各有效候选标的，之后持有，扣单边买入成本。
 
     去掉"事后挑中赢家"的偏差——比起拿 XLK/QQQ 长持（十几年里恰好封神的那只）当基准，
     与策略共享候选名单的等权才是判断"选择有没有加信息"的公平对照。
@@ -68,8 +69,17 @@ def equal_weight_equity(prices: dict[str, pd.DataFrame], initial_cash: float,
     adj = pd.DataFrame(cols).sort_index()
     if adj.empty:
         return None
-    daily = adj.pct_change(fill_method=None).mean(axis=1)
-    return (initial_cash * (1 + daily.fillna(0.0)).cumprod()).rename("equal_weight")
+    # 各市场日历不一致：未交易日沿用最近有效价格；IPO 前的份额留现金。
+    adj = adj.ffill()
+    per = initial_cash / len(adj.columns)
+    values = pd.DataFrame(index=adj.index)
+    for symbol in adj.columns:
+        first = adj[symbol].first_valid_index()
+        values[symbol] = per
+        if first is not None:
+            shares = per * (1 - cost_bps / 1e4) / float(adj.at[first, symbol])
+            values.loc[first:, symbol] = shares * adj.loc[first:, symbol]
+    return values.sum(axis=1).rename("equal_weight")
 
 
 def _signals(strategy_name: str, params: dict, prices_full: dict[str, pd.DataFrame],
@@ -184,9 +194,13 @@ def robustness_report(strategy_name: str, params: dict,
       excess_range: (最小超额年化, 最大超额年化)  ← 期望区间，报告的主角
     """
     sweep = timing_luck_sweep(strategy_name, params, prices, initial, cost_bps, offsets)
+    full_strat = tranched_equity(strategy_name, params, prices, prices,
+                                initial, cost_bps, offsets)
 
     defensive = defensive_symbols(params)
     pool = {s for s in prices if s not in defensive} or set(prices)
+    pool_full = equal_weight_equity(prices, initial, pool, cost_bps)
+    uni_full = equal_weight_equity(prices, initial, cost_bps=cost_bps)
 
     idx = pd.DatetimeIndex(sorted({t for df in prices.values() for t in df.index}))
     windows = [("全历史", None, None)] + list(split_windows(idx, n_windows))
@@ -198,13 +212,17 @@ def robustness_report(strategy_name: str, params: dict,
         pw = {s: df for s, df in pw.items() if not df.empty}
         if not pw:
             continue
-        strat = equity_metrics(
-            tranched_equity(strategy_name, params, prices, pw, initial, cost_bps,
-                            offsets, start, end), initial)
-        pool_eq = equal_weight_equity(pw, initial, pool)
-        uni_eq = equal_weight_equity(pw, initial)
-        pool_m = equity_metrics(pool_eq, initial) if pool_eq is not None else None
-        uni_m = equity_metrics(uni_eq, initial) if uni_eq is not None else None
+        # 分段取连续运行的权益曲线：窗口前信号及持仓必须承接。按窗口首值
+        # 归一化，分段收益只反映该段价格变化，不重复扣建仓成本。
+        segment = full_strat if start is None else full_strat.loc[start:end]
+        if segment.empty:
+            continue
+        segment_initial = initial if start is None else float(segment.iloc[0])
+        strat = equity_metrics(segment, segment_initial)
+        pool_eq = (pool_full if start is None else pool_full.loc[start:end]) if pool_full is not None else None
+        uni_eq = (uni_full if start is None else uni_full.loc[start:end]) if uni_full is not None else None
+        pool_m = equity_metrics(pool_eq, initial if start is None else float(pool_eq.iloc[0])) if pool_eq is not None and not pool_eq.empty else None
+        uni_m = equity_metrics(uni_eq, initial if start is None else float(uni_eq.iloc[0])) if uni_eq is not None and not uni_eq.empty else None
         rows.append({
             "label": label,
             "strategy": strat,

@@ -70,6 +70,8 @@ streamlit run quant/web/app.py          # 打开复盘面板（含 AI 基建公�
 python -m pytest tests/                 # 跑单元测试
 # 只刷新基本面与 AI 基建财报，不拉行情、不跑策略、不发通知
 python run_daily.py --research-only
+# 指定公司/数据种类；--force 忽略 7/30 天刷新间隔
+python run_daily.py --research-only --symbols NVDA AMKR --research-data fundamentals --force
 ```
 
 ## 配置
