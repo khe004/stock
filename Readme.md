@@ -21,7 +21,7 @@
 - **稳健性检验**（回测组合页）：调仓日 timing luck 散布 + 错峰 tranching + walk-forward 分段 + 池子等权，**输出期望区间不出通过/不通过**——回答「报出来的数字有没有虚高」，而非「有没有 alpha」
 - **模型组合**（相关性页）：多策略相关矩阵 + 低相关配方推荐 + 等权组合 vs 单策略/SPY/QQQ；内含杠杆分析（把夏普换成收益，仅分析用不改实盘信号）
 - **通知**：Telegram Bot + 邮件（SMTP），每条信号带人话理由；未配置的渠道自动跳过
-- **面板**：Streamlit 十页 —— 市场概览、信号历史、K线与信号、动量排名、市场筛选、避险手册、策略评分、策略相关性、回测、策略说明
+- **面板**：Streamlit 十一页 —— 市场概览、信号历史、K线与信号、动量排名、市场筛选、AI 基建、避险手册、策略评分、策略相关性、回测、策略说明
 - **幂等**：重复运行不重复入库、不重复推送；`--date` 可补跑历史日期，`--backfill` 补全历史信号
 
 ## 安装
@@ -74,6 +74,10 @@ python run_daily.py --research-only
 python run_daily.py --research-only --symbols NVDA AMKR --research-data fundamentals --force
 # 刷新阶段 2 的季度利润表、资产负债表和现金流样本
 python run_daily.py --research-only --research-data quarterly --force
+# 对照已人工核验的 8 家公司官方材料；非零退出表示缺期/币种/数值不一致
+python scripts/verify_quarterly_samples.py
+# 供应商整期缺失时，只导入基准文件中明确核验过的字段（不会从旧季度拼值）
+python scripts/import_verified_quarterly_fallbacks.py
 ```
 
 ## 配置

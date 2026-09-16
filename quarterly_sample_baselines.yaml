@@ -1,0 +1,86 @@
+# 人工对照公司 IR / 监管申报后保存的阶段 2 样本基准。
+# 金额使用报告币种的原始单位；只列已从原始材料明确核对的字段。
+# 该文件用于发现供应商缺期、币种误标或数量级错误，不用于覆盖生产数据。
+NVDA:
+  period_end: "2026-07-31"
+  published_at: "2026-08-26"
+  currency: USD
+  source_url: https://investor.nvidia.com/files/doc_financials/2027/NVDA-2027-Q2-10Q-Final-including-exhibits.pdf
+  metrics:
+    revenue: 96221000000
+    gross_profit: 72142000000
+    operating_income: 63734000000
+    net_income: 59688000000
+
+MU:
+  period_end: "2026-05-28"
+  # Yahoo 将 Micron 的 5/28 财季末正规化为自然月末；保留官方日期用于披露，
+  # 仅在核验供应商行时允许映射到 5/31。
+  provider_period_end: "2026-05-31"
+  published_at: "2026-06-24"
+  currency: USD
+  source_url: https://investors.micron.com/static-files/23023765-dfef-4e7e-845b-cd744fc20d93
+  metrics:
+    revenue: 41456000000
+    gross_profit: 35056000000
+    operating_income: 33318000000
+    net_income: 28243000000
+    operating_cash_flow: 25388000000
+
+VRT:
+  period_end: "2026-06-30"
+  published_at: "2026-07-29"
+  currency: USD
+  source_url: https://investors.vertiv.com/events-presentations/events-presentations/default.aspx
+  metrics:
+    revenue: 3274300000
+
+MSFT:
+  period_end: "2026-06-30"
+  published_at: "2026-07-29"
+  currency: USD
+  source_url: https://www.microsoft.com/en-us/investor/earnings/fy-2026-q4/press-release-webcast
+  metrics:
+    revenue: 90007000000
+    operating_income: 40603000000
+    net_income: 35766000000
+
+DLR:
+  period_end: "2026-06-30"
+  published_at: "2026-07-23"
+  currency: USD
+  source_url: https://investor.digitalrealty.com/news-releases/news-release-details/digital-realty-reports-second-quarter-2026-results
+  metrics:
+    revenue: 1924040000
+    net_income: 458000000
+
+TSM:
+  period_end: "2026-06-30"
+  published_at: "2026-07-16"
+  currency: TWD
+  source_url: https://investor.tsmc.com/chinese/encrypt/files/encrypt_file/reports/2026-07/a80d7933be643644081584087731f73b22ea5a2c/2Q26%20EarningsRelease.pdf
+  metrics:
+    revenue: 1270380250000
+    gross_profit: 860310700000
+    operating_income: 766568200000
+    net_income: 706561900000
+
+005930.KS:
+  period_end: "2026-06-30"
+  published_at: "2026-07-30"
+  currency: KRW
+  source_url: https://news.samsung.com/global/samsung-electronics-announces-second-quarter-2026-results
+  metrics:
+    revenue: 171499500000000
+    operating_income: 89492410000000
+
+ARM:
+  period_end: "2026-06-30"
+  published_at: "2026-07-29"
+  currency: USD
+  source_url: https://investors.arm.com/node/8356/html
+  metrics:
+    revenue: 1289000000
+    gross_profit: 1253000000
+    operating_cash_flow: 902000000
+    cash: 3888000000

@@ -7,7 +7,9 @@ import pandas as pd
 
 @dataclass
 class QuarterlyMetrics:
+    reported_latest_period: str | None = None
     latest_period: str | None = None
+    latest_period_incomplete: bool = False
     year_ago_period: str | None = None
     revenue: float | None = None
     revenue_yoy: float | None = None
@@ -61,12 +63,15 @@ def compute_quarterly_metrics(frame: pd.DataFrame) -> QuarterlyMetrics:
     work = frame.copy()
     work.index = pd.to_datetime(work.index)
     work = work.sort_index()
+    if len(work.index):
+        out.reported_latest_period = work.index[-1].strftime("%Y-%m-%d")
     valid_revenue = work[work["revenue"].notna()]
     if valid_revenue.empty:
         return out
     latest = valid_revenue.index[-1]
     row = work.loc[latest]
     out.latest_period = latest.strftime("%Y-%m-%d")
+    out.latest_period_incomplete = latest != work.index[-1]
     out.revenue = _number(row, "revenue")
     out.gross_margin = _ratio(_number(row, "gross_profit"), out.revenue)
     out.operating_margin = _ratio(_number(row, "operating_income"), out.revenue)

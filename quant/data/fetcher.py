@@ -195,10 +195,23 @@ def fetch_financials(symbol: str) -> pd.DataFrame | None:
     for attempt in range(1, MAX_RETRIES + 1):
         stmt = None
         try:
-            stmt = yf.Ticker(symbol).income_stmt
+            ticker = yf.Ticker(symbol)
+            stmt = ticker.income_stmt
         except Exception as e:  # noqa: BLE001 - yfinance 抛的异常类型不稳定
             last_err = e
         if stmt is not None and not stmt.empty:
+            fast_info = ticker.fast_info
+            trading_currency = fast_info.get("currency") if fast_info is not None else None
+            try:
+                info = ticker.info or {}
+            except Exception:  # noqa: BLE001
+                info = {}
+            stmt.attrs.update({
+                "currency": info.get("financialCurrency") or trading_currency,
+                "trading_currency": trading_currency,
+                "source": "Yahoo Finance via yfinance",
+                "source_url": f"https://finance.yahoo.com/quote/{quote(symbol, safe='')}/financials",
+            })
             return stmt
         if attempt < MAX_RETRIES:
             wait = 2 ** attempt
@@ -250,8 +263,12 @@ def update_financials(conn, symbols: list[str],
                     return None if math.isnan(f) else f
                 except (TypeError, ValueError):
                     return None
-            rows.append((fiscal_date, _to_float(revenue), _to_float(gross_profit),
-                         _to_float(operating_income), _to_float(net_income), captured_at))
+            rows.append((
+                fiscal_date, _to_float(revenue), _to_float(gross_profit),
+                _to_float(operating_income), _to_float(net_income),
+                stmt.attrs.get("currency"), stmt.attrs.get("trading_currency"),
+                stmt.attrs.get("source"), stmt.attrs.get("source_url"), captured_at,
+            ))
         if rows:
             store.upsert_financials(conn, symbol, rows)
             log.info("%s 财报已更新（%d 期）", symbol, len(rows))
@@ -299,8 +316,20 @@ def fetch_quarterly_statements(symbol: str) -> dict | None:
             }
             if any(df is not None and not df.empty for df in frames.values()):
                 fast_info = ticker.fast_info
-                currency = fast_info.get("currency") if fast_info is not None else None
-                return {"frames": frames, "currency": currency}
+                trading_currency = (fast_info.get("currency")
+                                    if fast_info is not None else None)
+                # yfinance 的表格数值使用财报币种，不一定是证券交易币种。
+                # 典型例子：TSM ADR 用 USD 交易，但合并财报表格是 TWD。
+                try:
+                    info = ticker.info or {}
+                except Exception:  # noqa: BLE001 - 币种补充失败不应丢掉三表
+                    info = {}
+                financial_currency = info.get("financialCurrency") or trading_currency
+                return {
+                    "frames": frames,
+                    "currency": financial_currency,
+                    "trading_currency": trading_currency,
+                }
         except Exception as exc:  # noqa: BLE001
             last_err = exc
         if attempt < MAX_RETRIES:
@@ -368,6 +397,7 @@ def update_quarterly_financials(conn, symbols: list[str], stale_days: int = 7,
             "symbol": symbol,
             "frequency": "quarterly",
             "currency": result.get("currency"),
+            "trading_currency": result.get("trading_currency"),
             "source": "Yahoo Finance via yfinance",
             "source_url": f"https://finance.yahoo.com/quote/{quote(symbol, safe='')}/financials",
             "published_at": None,

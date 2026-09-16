@@ -530,6 +530,14 @@ def test_spans_overlap():
 # ── AI 基建计算层 ──
 
 
+def test_valuation_warning_flags_extremes_without_dropping_values():
+    from quant.analysis.ai_infra import valuation_warning
+
+    assert valuation_warning(120.0, 30.0, 60.0) == "⚠️ 待核实：forward PE>100、P/S>50"
+    assert valuation_warning(25.0, 20.0, 10.0) == ""
+    assert valuation_warning(None, None, None) == ""
+
+
 def _fin_df(rows):
     """构造 financials DataFrame 用于测试。
     rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income), ...]

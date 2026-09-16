@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS financials (
     gross_profit REAL,
     operating_income REAL,
     net_income REAL,
+    currency TEXT,
+    trading_currency TEXT,
+    source TEXT,
+    source_url TEXT,
     captured_at TEXT NOT NULL,
     PRIMARY KEY (symbol, fiscal_date)
 );
@@ -103,6 +107,7 @@ CREATE TABLE IF NOT EXISTS financial_statement_snapshots (
     symbol TEXT NOT NULL,
     frequency TEXT NOT NULL,
     currency TEXT,
+    trading_currency TEXT,
     source TEXT NOT NULL,
     source_url TEXT,
     published_at TEXT,
@@ -140,6 +145,13 @@ FUNDAMENTALS_COLS = {
     "return_on_equity", "profit_margins", "gross_margins", "debt_to_equity",
     "market_cap", "book_value", "beta", "raw_json",
 }
+FINANCIAL_SNAPSHOT_ADDED_COLS = {
+    "trading_currency": "TEXT",
+}
+ANNUAL_FINANCIAL_ADDED_COLS = {
+    "currency": "TEXT", "trading_currency": "TEXT",
+    "source": "TEXT", "source_url": "TEXT",
+}
 
 
 def _table_cols(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -170,6 +182,20 @@ def _migrate(conn: sqlite3.Connection) -> None:
             conn.execute(
                 f"ALTER TABLE fundamentals ADD COLUMN {col} {FUNDAMENTALS_ADDED_COLS[col]}")
             log.warning("fundamentals 表缺列 %s，已补加（值为空，可从 raw_json 回填）", col)
+    # 财报事实的币种与证券交易币种必须分开。ADR（例如 TSM）以 USD 交易，
+    # 但其合并财报仍以 TWD 报告；混为一个字段会把金额放大约 30 倍。
+    snapshot_missing = (set(FINANCIAL_SNAPSHOT_ADDED_COLS)
+                        - _table_cols(conn, "financial_statement_snapshots"))
+    for col in sorted(snapshot_missing):
+        conn.execute(
+            f"ALTER TABLE financial_statement_snapshots ADD COLUMN "
+            f"{col} {FINANCIAL_SNAPSHOT_ADDED_COLS[col]}")
+        log.warning("financial_statement_snapshots 表缺列 %s，已补加", col)
+    annual_missing = set(ANNUAL_FINANCIAL_ADDED_COLS) - _table_cols(conn, "financials")
+    for col in sorted(annual_missing):
+        conn.execute(f"ALTER TABLE financials ADD COLUMN {col} "
+                     f"{ANNUAL_FINANCIAL_ADDED_COLS[col]}")
+        log.warning("financials 表缺列 %s，已补加", col)
     conn.commit()
 
 
@@ -210,10 +236,10 @@ def insert_financial_snapshot(conn: sqlite3.Connection, metadata: dict,
     """保存一版财务事实；snapshot_id 不复用，因此旧抓取版本始终保留。"""
     conn.execute(
         """INSERT INTO financial_statement_snapshots
-           (snapshot_id, symbol, frequency, currency, source, source_url,
-            published_at, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+           (snapshot_id, symbol, frequency, currency, trading_currency, source, source_url,
+            published_at, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         tuple(metadata.get(k) for k in (
-            "snapshot_id", "symbol", "frequency", "currency", "source",
+            "snapshot_id", "symbol", "frequency", "currency", "trading_currency", "source",
             "source_url", "published_at", "captured_at")),
     )
     conn.executemany(
@@ -240,7 +266,8 @@ def load_latest_financial_facts(conn: sqlite3.Connection, symbol: str,
                                 frequency: str = "quarterly") -> pd.DataFrame:
     """读取单个最新快照的全部事实；不跨快照补空值。"""
     return pd.read_sql_query(
-        """SELECT f.*, s.symbol, s.frequency, s.currency, s.source, s.source_url,
+        """SELECT f.*, s.symbol, s.frequency, s.currency, s.trading_currency,
+                  s.source, s.source_url,
                   s.published_at, s.captured_at
            FROM financial_facts AS f
            JOIN financial_statement_snapshots AS s USING (snapshot_id)
@@ -262,7 +289,7 @@ def load_latest_quarterly_financials(conn: sqlite3.Connection, symbol: str) -> p
                               aggfunc="first", dropna=False).sort_index()
     first = facts.iloc[0]
     frame.attrs.update({k: first[k] for k in (
-        "snapshot_id", "symbol", "currency", "source", "source_url",
+        "snapshot_id", "symbol", "currency", "trading_currency", "source", "source_url",
         "published_at", "captured_at")})
     return frame
 
@@ -451,12 +478,16 @@ def load_latest_fundamentals(
 
 def upsert_financials(conn: sqlite3.Connection, symbol: str,
                       rows: list[tuple]) -> int:
-    """写入年度财报数据。rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income, captured_at), ...]。
+    """写入年度财报数据，金额币种与证券交易币种分别保存。
+
+    rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income,
+             currency, trading_currency, source, source_url, captured_at), ...]。
     (symbol, fiscal_date) 已存在则覆盖。返回写入行数。"""
     conn.executemany(
         """INSERT OR REPLACE INTO financials
-           (symbol, fiscal_date, revenue, gross_profit, operating_income, net_income, captured_at)
-           VALUES (?,?,?,?,?,?,?)""",
+           (symbol, fiscal_date, revenue, gross_profit, operating_income, net_income,
+            currency, trading_currency, source, source_url, captured_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
         [(symbol, *r) for r in rows],
     )
     conn.commit()

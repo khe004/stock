@@ -1,5 +1,6 @@
 """读取 config.yaml 与 .env，提供全局配置对象。"""
 
+import os
 from pathlib import Path
 
 import yaml
@@ -15,6 +16,9 @@ class Config:
 
     @property
     def db_path(self) -> Path:
+        override = os.getenv("QUANT_DB_PATH")
+        if override:
+            return Path(override)
         return ROOT / self.raw["database"]
 
     @property

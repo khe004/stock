@@ -2413,6 +2413,7 @@ def render_ai_infra():
         display_name,
         get_currency_for_symbol,
         to_usd_market_cap,
+        valuation_warning,
     )
     from quant.strategies.selectors import momentum_return
     from quant.analysis.research_status import research_status
@@ -2432,11 +2433,10 @@ def render_ai_infra():
         "「营收CAGR」「毛利率」「净利率」来自**年度利润表**，更平滑但**滞后 6~12 个月**"
         "（最新财年早已结束，MU 的年报同比只有 +49%）。赛道概览的「营收增长中位数」用季度口径，"
         "与股价涨幅的时效对齐。\n\n"
-        "📉 **动量量的是价格，增速量的是基本面——两者背离的差额就是估值**。明细表里"
-        "「12-1动量」低而「营收CAGR」高的标的（如 2026-08 的 NVDA：营收 3 年 +100% CAGR、"
-        "股价却只涨 15%、forward PE 压到 16），是**兑现了但估值被收走**；反过来 INTC 营收"
-        "CAGR **-5.7%** 却涨 446%、PE 顶到 49，那 446% 里没有一分来自增长，全是困境反转的"
-        "估值扩张。**别把动量榜首当质量榜首。**\n\n"
+        "📉 **动量量的是价格，增速量的是基本面，两者背离不能直接归因为估值变化**。"
+        "股价还会反映市场预期、利率、风险偏好、资本结构与一次性事件；而年度 CAGR 与 12-1 动量"
+        "也不是同一观察窗口。应把背离当成进一步核查的线索，再结合相同日期的 PE、EV/EBITDA、"
+        "P/S 和原始财报验证，不能从两列差值推出因果。**别把动量榜首当质量榜首。**\n\n"
         "「近1月」是 12-1 动量**跳过的那 21 天**，两列并排看才能发现轮动掉头："
         "12-1 靠 skip=21 躲短期反转，代价是排名滞后于正在发生的轮动。\n\n"
         "💰 **估值三列要一起看，别只看 forward PE**。forward PE 的分母是**分析师预期 EPS**，"
@@ -2745,6 +2745,7 @@ def render_ai_infra():
                 "forward PE": fpe,
                 "EV/EBITDA": ev_ebitda,
                 "P/S": ps,
+                "估值核查": valuation_warning(fpe, ev_ebitda, ps),
                 "价值分位": vp,
                 # 价值分位为空时区分"池外无此指标"与"池内但缺数据"——数值列放不下这个
                 # 说明，单独一列标注，保证价值分位列仍可按数值排序
@@ -2754,6 +2755,16 @@ def render_ai_infra():
             })
 
         detail_df = pd.DataFrame(detail_rows)
+
+        sort_options = ["市值", "12-1动量", "近1月", "营收同比(季)",
+                        "forward PE", "EV/EBITDA", "P/S"]
+        sort_col = st.selectbox("明细排序", sort_options, key="ai_infra_sort")
+        # 倍数越低越便宜，其余指标越高越靠前。显式排序会跨公司详情 rerun 保留，
+        # 不依赖前端表头排序的临时状态。
+        detail_df = detail_df.sort_values(
+            sort_col, ascending=sort_col in {"forward PE", "EV/EBITDA", "P/S"},
+            na_position="last",
+        )
 
         # 缺失市值的成分数
         n_missing_cap = sum(1 for s in lane_syms if market_caps.get(s) is None)
@@ -2865,6 +2876,13 @@ def render_ai_infra():
             else:
                 qm = compute_quarterly_metrics(quarterly_df)
                 currency = quarterly_df.attrs.get("currency") or "币种未知"
+                trading_currency = quarterly_df.attrs.get("trading_currency") or "未知"
+
+                if qm.latest_period_incomplete:
+                    st.warning(
+                        f"供应商快照包含 {qm.reported_latest_period}，但该期核心字段为空；"
+                        f"下方暂显示最近有营收数据的 {qm.latest_period}。这不是最新季度已核验完成。"
+                    )
 
                 def _money(value, absolute=False):
                     if value is None or pd.isna(value):
@@ -2921,7 +2939,8 @@ def render_ai_infra():
                 source = quarterly_df.attrs.get("source") or "未知来源"
                 source_text = f"[{source}]({source_url})" if source_url else source
                 st.caption(
-                    f"报告期：{qm.latest_period or '无'}；币种：{currency}；来源：{source_text}；"
+                    f"报告期：{qm.latest_period or '无'}；财报币种：{currency}；"
+                    f"交易币种：{trading_currency}；来源：{source_text}；"
                     f"抓取时间：{quarterly_df.attrs.get('captured_at') or '无'}。"
                     "供应商未提供可靠发布日期与报告期起始日，当前查询结果不支持历史已知信息回放。"
                 )
@@ -2942,7 +2961,17 @@ def render_ai_infra():
                     if col in fin_display.columns:
                         fin_display[col] = fin_display[col].map(compact_amount)
                 st.dataframe(fin_display, width="stretch", hide_index=True)
-                st.caption("金额按原始财报单位缩写：M=百万，B=十亿，T=万亿；财报币种当前未单独存储。")
+                annual_latest = detail_fin.iloc[-1]
+                annual_source = annual_latest.get("source") or "未知来源"
+                annual_url = annual_latest.get("source_url")
+                annual_source_text = (f"[{annual_source}]({annual_url})"
+                                      if annual_url else annual_source)
+                st.caption(
+                    "金额按原始财报单位缩写：M=百万，B=十亿，T=万亿；"
+                    f"财报币种：{annual_latest.get('currency') or '未知'}；"
+                    f"交易币种：{annual_latest.get('trading_currency') or currencies.get(detail_symbol, '未知')}；"
+                    f"来源：{annual_source_text}；抓取时间：{annual_latest.get('captured_at') or '无'}。"
+                )
                 latest_gm = growth_metrics.get(detail_symbol)
                 if latest_gm:
                     st.caption(

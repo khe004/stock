@@ -309,6 +309,20 @@ def compute_lane_market_share(
     return result
 
 
+def valuation_warning(forward_pe: float | None, ev_to_ebitda: float | None,
+                      price_to_sales: float | None) -> str:
+    """标出只适合回查原始数据的极端估值倍数，不擅自缩尾或删除。"""
+    flags = []
+    for label, value, threshold in (
+        ("forward PE", forward_pe, 100.0),
+        ("EV/EBITDA", ev_to_ebitda, 100.0),
+        ("P/S", price_to_sales, 50.0),
+    ):
+        if value is not None and not _is_nan(value) and value > threshold:
+            flags.append(f"{label}>{threshold:g}")
+    return "⚠️ 待核实：" + "、".join(flags) if flags else ""
+
+
 # ---------------------------------------------------------------------------
 # 2.3 赛道汇总
 # ---------------------------------------------------------------------------

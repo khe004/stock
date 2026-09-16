@@ -216,3 +216,27 @@ def test_update_fundamentals_failure_continues(monkeypatch):
     # AAPL 和 MSFT 都应成功入库
     df = store.load_fundamentals(conn)
     assert set(df["symbol"]) == {"AAPL", "MSFT"}
+
+
+def test_annual_financials_keep_statement_and_trading_currencies(monkeypatch):
+    periods = pd.to_datetime(["2025-12-31"])
+    statement = pd.DataFrame(
+        [[100.0], [60.0], [30.0], [20.0]],
+        index=["Total Revenue", "Gross Profit", "Operating Income", "Net Income"],
+        columns=periods,
+    )
+
+    class FakeTicker:
+        def __init__(self, symbol):
+            self.income_stmt = statement.copy()
+            self.fast_info = {"currency": "USD"}
+            self.info = {"financialCurrency": "TWD"}
+
+    monkeypatch.setattr(fetcher.yf, "Ticker", FakeTicker)
+    conn = make_conn()
+    ok, failed = fetcher.update_financials(conn, ["TSM"], stale_days=-1)
+    assert (ok, failed) == (1, [])
+    saved = store.load_financials(conn, "TSM").iloc[0]
+    assert saved["currency"] == "TWD"
+    assert saved["trading_currency"] == "USD"
+    assert saved["source"] == "Yahoo Finance via yfinance"
