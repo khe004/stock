@@ -56,6 +56,12 @@ class Config:
             seen.setdefault(s)
         return list(seen)
 
+    @property
+    def quarterly_research_symbols(self) -> list[str]:
+        """阶段 2 首批季度三表验证样本。"""
+        configured = self.raw.get("quarterly_research", {}).get("symbols", [])
+        return list(dict.fromkeys(configured))
+
     def symbols_for(self, groups: list[str]) -> list[str]:
         seen: dict[str, None] = {}
         for g in groups:

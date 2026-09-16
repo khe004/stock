@@ -72,6 +72,8 @@ python -m pytest tests/                 # 跑单元测试
 python run_daily.py --research-only
 # 指定公司/数据种类；--force 忽略 7/30 天刷新间隔
 python run_daily.py --research-only --symbols NVDA AMKR --research-data fundamentals --force
+# 刷新阶段 2 的季度利润表、资产负债表和现金流样本
+python run_daily.py --research-only --research-data quarterly --force
 ```
 
 ## 配置
@@ -89,7 +91,7 @@ quant/config.py     配置加载
 quant/data/         yfinance 拉取 + SQLite 存储
 quant/strategies/   11 个策略（base + 各策略；REGISTRY 注册）
 quant/backtest/     回测引擎（单标的 / 组合轮动 / 定投 / 波动率缩放）
-quant/analysis/     纯计算：market / scoring / screening / correlation / robustness / drawdowns
+quant/analysis/     纯计算：market / scoring / screening / quarterly / correlation / robustness / drawdowns
 quant/notify/       Telegram + 邮件推送
 quant/web/app.py    Streamlit 十一页面板
 tests/              单元测试

@@ -19,7 +19,8 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 
 - `run_daily.py`：主入口。拉数据 → 各策略 generate → 信号入库（唯一约束幂等）→ dispatch 推送
 - `quant/config.py`：config.yaml + .env；`update_symbols` = watchlist + 各策略 universe_file
-- `quant/data/`：yfinance 增量拉取（首拉空表报错）、SQLite（prices/signals 两表）
+- `quant/data/`：yfinance 增量拉取（首拉空表报错）、SQLite；季度三表按 snapshot + facts
+  保存来源/币种/抓取时间与历史版本，最新快照缺失值不从旧版拼接
 - `quant/strategies/`：基类 `generate(prices: dict[symbol, df]) -> list[Signal]`，对**全量历史**出信号；
   每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY。`selectors.py`（2026-07-30
   抽出）收敛了 6 个策略里各自独立抄写的 12-1 动量公式与强度映射（`momentum_return`/
@@ -36,7 +37,8 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
   correlation.py（策略相关性/组合诊断：各策略权益曲线转日收益率→Pearson相关矩阵→等权组合分散效果；
   `suggest_low_corr_set` 贪心挑低相关成分，供相关性页的「🧺 模型组合」用——对 specification risk
   与「策略有时效性」的实操回答：不是找永远有效的那个，而是同时持有几个决策方式不同、相互低相关的）、
-  screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面]+价值半[forward盈利收益率+EV/EBITDA收益率双口径的行业内百分位，抗一次性收益畸变；金融EV/EBITDA失效则只用forward]，当前基本面快照非point-in-time）
+  screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面]+价值半[forward盈利收益率+EV/EBITDA收益率双口径的行业内百分位，抗一次性收益畸变；金融EV/EBITDA失效则只用forward]，当前基本面快照非point-in-time）、
+  quarterly.py（季度同比、利润率、现金流与连续四季 TTM；缺季度不凑数）
 - `quant/web/app.py`：十一页面板（市场概览/信号历史/K线/动量排名/市场筛选/AI基建/避险手册/策略评分/策略相关性/回测/策略说明）；
   避险手册页（`analysis/drawdowns.py`）：SPY 识别历史下跌段→每段测各避险资产总回报→崩盘类型自动判定
   （闪崩/通缩型-TLT有效/通胀型-TLT失效需商品黄金），含当前进行中回撤的实时"对号入座"；

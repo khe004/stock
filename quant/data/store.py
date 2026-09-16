@@ -97,6 +97,34 @@ CREATE TABLE IF NOT EXISTS research_updates (
 );
 """
 
+SCHEMA_FINANCIAL_FACTS = """
+CREATE TABLE IF NOT EXISTS financial_statement_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    frequency TEXT NOT NULL,
+    currency TEXT,
+    source TEXT NOT NULL,
+    source_url TEXT,
+    published_at TEXT,
+    captured_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_financial_snapshots_symbol
+    ON financial_statement_snapshots(symbol, frequency, captured_at);
+
+CREATE TABLE IF NOT EXISTS financial_facts (
+    snapshot_id TEXT NOT NULL,
+    period_start TEXT,
+    period_end TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    metric TEXT NOT NULL,
+    value REAL,
+    unit TEXT NOT NULL,
+    raw_label TEXT,
+    PRIMARY KEY (snapshot_id, period_end, statement, metric),
+    FOREIGN KEY (snapshot_id) REFERENCES financial_statement_snapshots(snapshot_id)
+);
+"""
+
 
 # 迁移用：两张表的期望列。老版本库（早期在用户机器上重建过的 schema）可能缺列
 PRICES_COL_TYPES = {
@@ -154,6 +182,7 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.executescript(SCHEMA_FUNDAMENTALS)
     conn.executescript(SCHEMA_FINANCIALS)
     conn.executescript(SCHEMA_RESEARCH_UPDATES)
+    conn.executescript(SCHEMA_FINANCIAL_FACTS)
     _migrate(conn)
     return conn
 
@@ -174,6 +203,68 @@ def load_research_updates(conn: sqlite3.Connection, symbols: list[str]) -> pd.Da
     return pd.read_sql_query(
         f"SELECT * FROM research_updates WHERE symbol IN ({placeholders})",
         conn, params=symbols)
+
+
+def insert_financial_snapshot(conn: sqlite3.Connection, metadata: dict,
+                              facts: list[dict]) -> int:
+    """保存一版财务事实；snapshot_id 不复用，因此旧抓取版本始终保留。"""
+    conn.execute(
+        """INSERT INTO financial_statement_snapshots
+           (snapshot_id, symbol, frequency, currency, source, source_url,
+            published_at, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        tuple(metadata.get(k) for k in (
+            "snapshot_id", "symbol", "frequency", "currency", "source",
+            "source_url", "published_at", "captured_at")),
+    )
+    conn.executemany(
+        """INSERT INTO financial_facts
+           (snapshot_id, period_start, period_end, statement, metric, value, unit, raw_label)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        [(metadata["snapshot_id"], *(fact.get(k) for k in (
+            "period_start", "period_end", "statement", "metric", "value", "unit",
+            "raw_label"))) for fact in facts],
+    )
+    conn.commit()
+    return len(facts)
+
+
+def latest_statement_capture(conn: sqlite3.Connection, symbol: str,
+                             frequency: str = "quarterly") -> str | None:
+    row = conn.execute(
+        """SELECT MAX(captured_at) AS d FROM financial_statement_snapshots
+           WHERE symbol = ? AND frequency = ?""", (symbol, frequency)).fetchone()
+    return row["d"]
+
+
+def load_latest_financial_facts(conn: sqlite3.Connection, symbol: str,
+                                frequency: str = "quarterly") -> pd.DataFrame:
+    """读取单个最新快照的全部事实；不跨快照补空值。"""
+    return pd.read_sql_query(
+        """SELECT f.*, s.symbol, s.frequency, s.currency, s.source, s.source_url,
+                  s.published_at, s.captured_at
+           FROM financial_facts AS f
+           JOIN financial_statement_snapshots AS s USING (snapshot_id)
+           WHERE s.snapshot_id = (
+               SELECT snapshot_id FROM financial_statement_snapshots
+               WHERE symbol = ? AND frequency = ?
+               ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1
+           )
+           ORDER BY f.period_end, f.statement, f.metric""",
+        conn, params=[symbol, frequency])
+
+
+def load_latest_quarterly_financials(conn: sqlite3.Connection, symbol: str) -> pd.DataFrame:
+    """把最新季度事实快照展开为 period_end × metric，元数据保留在 attrs。"""
+    facts = load_latest_financial_facts(conn, symbol, "quarterly")
+    if facts.empty:
+        return pd.DataFrame()
+    frame = facts.pivot_table(index="period_end", columns="metric", values="value",
+                              aggfunc="first", dropna=False).sort_index()
+    first = facts.iloc[0]
+    frame.attrs.update({k: first[k] for k in (
+        "snapshot_id", "symbol", "currency", "source", "source_url",
+        "published_at", "captured_at")})
+    return frame
 
 
 def upsert_prices(conn: sqlite3.Connection, symbol: str, df: pd.DataFrame) -> int:

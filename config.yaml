@@ -238,6 +238,7 @@ model_portfolio:
     - smart_dca         # 定投腿（节奏完全不同的决策方式）
   hold_assets:               # 买入持有的 ETF（非策略、无信号，作为独立收益腿）
     - DBMF              # 管理期货 CTA —— 2026-08-04 加入，第一个真·独立收益源
+
   # 【2026-07-28 换人记录】原成分是 cross_asset_mom，换成 canary_mom 的理由：
   # 两者相关 0.76（共享同一进攻宇宙）= 替代关系而非互补；换后全历史夏普 0.96→1.01、
   # Calmar 0.60→0.67、回撤 -20.6%→-18.0%、收益基本持平，且换后**两个半段的夏普都是
@@ -256,6 +257,10 @@ model_portfolio:
   # 用户判断"理论说得通、7年够了、让它跑起来攒样本外"故纳入。DBMF 仍在 watch_only 组
   # （不喂给任何策略），此处只作组合成分。
   # 诚实通则：成分沿用月首日调仓故仍带 timing luck；配方是拿全历史挑的，属轻度 in-sample。
+
+# 阶段 2：季度三表首批跨市场验证样本（不构成投资筛选）
+quarterly_research:
+  symbols: [NVDA, MU, VRT, MSFT, DLR, TSM, 005930.KS, ARM]
 
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID

@@ -2416,6 +2416,7 @@ def render_ai_infra():
     )
     from quant.strategies.selectors import momentum_return
     from quant.analysis.research_status import research_status
+    from quant.analysis.quarterly import compute_quarterly_metrics, describe_quarterly_change
 
     st.title("🤖 AI 基建")
 
@@ -2478,19 +2479,25 @@ def render_ai_infra():
 
     status_df = research_status(conn, all_syms)
     st.subheader("研究数据状态")
-    status_cols = st.columns(3)
+    status_cols = st.columns(4)
     for col, label in zip(status_cols, ("行情日期", "基本面日期", "财报抓取时间")):
         covered = int(status_df[label].notna().sum())
         overdue = int((status_df[label + "状态"] == "过期").sum())
         col.metric(label.replace("日期", "").replace("抓取时间", "") + "覆盖",
                    f"{covered}/{len(all_syms)}", help=f"过期 {overdue} 只")
+    quarterly_status = status_df[status_df["代码"].isin(cfg.quarterly_research_symbols)]
+    q_covered = int(quarterly_status["季度三表抓取时间"].notna().sum())
+    q_overdue = int((quarterly_status["季度三表抓取时间状态"] == "过期").sum())
+    status_cols[3].metric("季度三表样本", f"{q_covered}/{len(cfg.quarterly_research_symbols)}",
+                          help=f"过期 {q_overdue} 只；当前仅验证样本")
     problem = status_df[
         (status_df[["行情日期状态", "基本面日期状态", "财报抓取时间状态"]] != "正常").any(axis=1)
         | (status_df.get("基本面更新结果", pd.Series(index=status_df.index)) == "failed")
         | (status_df.get("财报更新结果", pd.Series(index=status_df.index)) == "failed")
+        | (status_df.get("季度三表更新结果", pd.Series(index=status_df.index)) == "failed")
     ]
     with st.expander(f"缺失、过期与最近失败（{len(problem)} 只）"):
-        st.caption("行情超过 7 天、基本面超过 7 天、财报抓取超过 30 天标为过期；"
+        st.caption("行情/基本面/季度三表超过 7 天、年度财报抓取超过 30 天标为过期；"
                    "财报抓取时间不是财报发布日。失败原因仅记录最近一次研究更新。")
         st.dataframe(problem, width="stretch", hide_index=True)
         st.caption("刷新示例：python run_daily.py --research-only --symbols NVDA --force")
@@ -2847,6 +2854,77 @@ def render_ai_infra():
                     fig.update_layout(height=320, margin=dict(l=10, r=10, t=20, b=10),
                                       yaxis_title=f"价格（{currencies.get(detail_symbol, 'USD')}）")
                     st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("**季度经营变化**")
+            quarterly_df = store.load_latest_quarterly_financials(conn, detail_symbol)
+            if quarterly_df.empty:
+                if detail_symbol in cfg.quarterly_research_symbols:
+                    st.info("该样本暂无季度三表快照；运行季度研究更新后再查看。")
+                else:
+                    st.caption("当前季度三表仍在 8 家跨市场样本验证阶段，该公司尚未接入。")
+            else:
+                qm = compute_quarterly_metrics(quarterly_df)
+                currency = quarterly_df.attrs.get("currency") or "币种未知"
+
+                def _money(value, absolute=False):
+                    if value is None or pd.isna(value):
+                        return "—"
+                    number = abs(value) if absolute else value
+                    return f"{currency} {compact_amount(number)}"
+
+                qcols = st.columns(6)
+                qcols[0].metric("季度营收", _money(qm.revenue),
+                                _metric_text(qm.revenue_yoy, "+.1%"))
+                op_delta = (qm.operating_margin - qm.operating_margin_year_ago
+                            if qm.operating_margin is not None
+                            and qm.operating_margin_year_ago is not None else None)
+                qcols[1].metric("营业利润率", _metric_text(qm.operating_margin, ".1%"),
+                                _metric_text(op_delta, "+.1%"))
+                qcols[2].metric("经营现金流", _money(qm.operating_cash_flow))
+                qcols[3].metric("资本开支", _money(qm.capital_expenditure, absolute=True))
+                qcols[4].metric("自由现金流", _money(qm.free_cash_flow))
+                net_cash = (qm.cash - qm.total_debt if qm.cash is not None
+                            and qm.total_debt is not None else None)
+                qcols[5].metric("净现金/债务", _money(net_cash))
+                st.caption(describe_quarterly_change(qm))
+
+                qdisplay = quarterly_df.tail(6).reset_index().rename(columns={
+                    "period_end": "报告期", "revenue": "营收",
+                    "operating_income": "营业利润", "operating_cash_flow": "经营现金流",
+                    "capital_expenditure": "资本开支", "free_cash_flow": "自由现金流",
+                })
+                if "自由现金流" not in qdisplay.columns:
+                    qdisplay["自由现金流"] = None
+                if {"经营现金流", "资本开支"} <= set(qdisplay.columns):
+                    derived = qdisplay["经营现金流"] + qdisplay["资本开支"]
+                    qdisplay["自由现金流"] = qdisplay["自由现金流"].fillna(derived)
+                shown = [c for c in ("报告期", "营收", "营业利润", "经营现金流",
+                                     "资本开支", "自由现金流") if c in qdisplay.columns]
+                for col in shown[1:]:
+                    qdisplay[col] = qdisplay[col].map(compact_amount)
+                st.dataframe(qdisplay[shown], width="stretch", hide_index=True)
+
+                ttm_rows = {
+                    "营收": qm.ttm_revenue,
+                    "营业利润": qm.ttm_operating_income,
+                    "经营现金流": qm.ttm_operating_cash_flow,
+                    "资本开支": qm.ttm_capital_expenditure,
+                    "自由现金流": qm.ttm_free_cash_flow,
+                }
+                st.caption("TTM（仅四个连续季度均有值时计算）：" + "；".join(
+                    f"{name} {_money(value, absolute=name == '资本开支')}"
+                    for name, value in ttm_rows.items()))
+                if qm.capital_expenditure is None and qm.free_cash_flow is not None:
+                    st.caption("⚠️ 供应商提供了自由现金流但未提供资本开支；该自由现金流按供应商"
+                               "口径原样展示，不用于推导资本开支，也不宜与其他公司直接比较。")
+                source_url = quarterly_df.attrs.get("source_url")
+                source = quarterly_df.attrs.get("source") or "未知来源"
+                source_text = f"[{source}]({source_url})" if source_url else source
+                st.caption(
+                    f"报告期：{qm.latest_period or '无'}；币种：{currency}；来源：{source_text}；"
+                    f"抓取时间：{quarterly_df.attrs.get('captured_at') or '无'}。"
+                    "供应商未提供可靠发布日期与报告期起始日，当前查询结果不支持历史已知信息回放。"
+                )
 
             st.markdown("**年度经营趋势**")
             if detail_fin.empty:

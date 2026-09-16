@@ -2,6 +2,10 @@
 
 import logging
 import time
+import uuid
+from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
+
 import pandas as pd
 import yfinance as yf
 
@@ -10,6 +14,15 @@ from quant.data import store
 log = logging.getLogger(__name__)
 
 MAX_RETRIES = 3
+
+
+def _to_float(value):
+    if value is None or pd.isna(value):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 COLUMN_MAP = {
     "Open": "open",
@@ -248,4 +261,122 @@ def update_financials(conn, symbols: list[str],
         elif report is not None:
             report[symbol] = ("failed", "财报没有可写入的报告期")
             failed.append(symbol)
+    return ok_count, failed
+
+
+# ---------- 季度三表（阶段 2 样本验证）----------
+
+QUARTERLY_METRICS = {
+    "income": {
+        "revenue": ("Total Revenue",),
+        "gross_profit": ("Gross Profit",),
+        "operating_income": ("Operating Income",),
+        "net_income": ("Net Income", "Net Income Common Stockholders"),
+    },
+    "balance": {
+        "cash": ("Cash Cash Equivalents And Short Term Investments",
+                 "Cash And Cash Equivalents"),
+        "total_debt": ("Total Debt",),
+    },
+    "cashflow": {
+        "operating_cash_flow": ("Operating Cash Flow",),
+        "capital_expenditure": ("Capital Expenditure",),
+        "free_cash_flow": ("Free Cash Flow",),
+    },
+}
+
+
+def fetch_quarterly_statements(symbol: str) -> dict | None:
+    """拉取 Yahoo 季度三表；至少一张表有数据即返回，其余缺失保持为空。"""
+    last_err: Exception | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            ticker = yf.Ticker(symbol)
+            frames = {
+                "income": ticker.quarterly_income_stmt,
+                "balance": ticker.quarterly_balance_sheet,
+                "cashflow": ticker.quarterly_cashflow,
+            }
+            if any(df is not None and not df.empty for df in frames.values()):
+                fast_info = ticker.fast_info
+                currency = fast_info.get("currency") if fast_info is not None else None
+                return {"frames": frames, "currency": currency}
+        except Exception as exc:  # noqa: BLE001
+            last_err = exc
+        if attempt < MAX_RETRIES:
+            wait = 2 ** attempt
+            log.warning("%s 季度三表第 %d 次拉取失败，%ds 后重试: %s",
+                        symbol, attempt, wait, last_err or "返回空表")
+            time.sleep(wait)
+    log.error("%s 季度三表拉取失败（重试 %d 次）: %s", symbol, MAX_RETRIES,
+              last_err or "三张表均为空")
+    return None
+
+
+def normalize_quarterly_facts(result: dict) -> list[dict]:
+    """把 yfinance 的宽表转成长表事实；保留空值，避免后续跨版本补值。"""
+    facts = []
+    currency = result.get("currency") or "UNKNOWN"
+    for statement, metric_map in QUARTERLY_METRICS.items():
+        frame = result["frames"].get(statement)
+        if frame is None or frame.empty:
+            continue
+        for metric, aliases in metric_map.items():
+            raw_label = next((label for label in aliases if label in frame.index), None)
+            if raw_label is None:
+                continue
+            for period in frame.columns:
+                period_end = pd.Timestamp(period).strftime("%Y-%m-%d")
+                facts.append({
+                    "period_start": None,
+                    "period_end": period_end,
+                    "statement": statement,
+                    "metric": metric,
+                    "value": _to_float(frame.at[raw_label, period]),
+                    "unit": currency,
+                    "raw_label": raw_label,
+                })
+    return facts
+
+
+def update_quarterly_financials(conn, symbols: list[str], stale_days: int = 7,
+                                report: dict | None = None) -> tuple[int, list[str]]:
+    """保存季度三表版本快照；不会覆盖之前抓取到的版本。"""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=stale_days)).isoformat()
+    ok_count, failed = 0, []
+    for symbol in symbols:
+        latest = store.latest_statement_capture(conn, symbol, "quarterly")
+        if latest and latest >= cutoff:
+            if report is not None:
+                report[symbol] = ("skipped", f"最近抓取 {latest}")
+            continue
+        result = fetch_quarterly_statements(symbol)
+        if result is None:
+            failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", "季度三表均为空或请求失败")
+            continue
+        facts = normalize_quarterly_facts(result)
+        if not facts:
+            failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", "未找到已映射的季度字段")
+            continue
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+        metadata = {
+            "snapshot_id": uuid.uuid4().hex,
+            "symbol": symbol,
+            "frequency": "quarterly",
+            "currency": result.get("currency"),
+            "source": "Yahoo Finance via yfinance",
+            "source_url": f"https://finance.yahoo.com/quote/{quote(symbol, safe='')}/financials",
+            "published_at": None,
+            "captured_at": captured_at,
+        }
+        count = store.insert_financial_snapshot(conn, metadata, facts)
+        ok_count += 1
+        if report is not None:
+            periods = len({fact["period_end"] for fact in facts})
+            report[symbol] = ("updated", f"写入 {periods} 期 / {count} 个事实")
+        log.info("%s 季度三表已更新（%d 个事实）", symbol, count)
     return ok_count, failed

@@ -116,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="只更新研究数据（--fundamentals-only 的明确别名）")
     parser.add_argument("--symbols", nargs="+", metavar="SYMBOL",
                         help="研究更新指定标的；仅可用于 --research-only")
-    parser.add_argument("--research-data", choices=("all", "fundamentals", "financials"),
+    parser.add_argument("--research-data",
+                        choices=("all", "fundamentals", "financials", "quarterly"),
                         default="all", help="研究更新的数据类型（默认 all）")
     parser.add_argument("--force", action="store_true", help="研究更新忽略刷新间隔")
     args = parser.parse_args(argv)
@@ -146,15 +147,21 @@ def main(argv: list[str] | None = None) -> int:
             if requested and not fin_symbols:
                 parser.error("指定标的均不在 AI 财报观察池")
             jobs.append(("financials", fin_symbols))
+        if args.research_data in ("all", "quarterly"):
+            quarterly_symbols = requested or cfg.quarterly_research_symbols
+            jobs.append(("quarterly", quarterly_symbols))
         any_failed = False
         for data_type, symbols in jobs:
             report: dict[str, tuple[str, str]] = {}
             if data_type == "fundamentals":
                 fetcher.update_fundamentals(conn, symbols, _date.today().isoformat(),
                                             stale_days=-1 if args.force else 7, report=report)
-            else:
+            elif data_type == "financials":
                 fetcher.update_financials(conn, symbols,
                                           stale_days=-1 if args.force else 30, report=report)
+            else:
+                fetcher.update_quarterly_financials(
+                    conn, symbols, stale_days=-1 if args.force else 7, report=report)
             for symbol, (status, detail) in report.items():
                 store.record_research_update(conn, symbol, data_type, status, detail)
                 log.info("研究更新 %s %s: %s (%s)", data_type, symbol, status, detail)
@@ -196,6 +203,14 @@ def main(argv: list[str] | None = None) -> int:
             log.info("财报更新完成：成功 %d，失败 %d", fin_ok, len(fin_fail))
         except Exception:  # noqa: BLE001
             log.error("财报抓取整体异常，不影响信号主流程", exc_info=True)
+
+    if not args.no_fetch and not args.no_fundamentals and cfg.quarterly_research_symbols:
+        try:
+            quarterly_ok, quarterly_fail = fetcher.update_quarterly_financials(
+                conn, cfg.quarterly_research_symbols)
+            log.info("季度三表更新完成：成功 %d，失败 %d", quarterly_ok, len(quarterly_fail))
+        except Exception:  # noqa: BLE001
+            log.error("季度三表抓取整体异常，不影响信号主流程", exc_info=True)
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}
