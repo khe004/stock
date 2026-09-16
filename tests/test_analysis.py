@@ -45,6 +45,14 @@ def test_yield_curve_spread():
     assert yield_curve_spread(pd.Series(dtype=float), short_y) is None
 
 
+def test_compact_financial_amounts():
+    from quant.analysis.ai_infra import compact_amount
+    assert compact_amount(1_234_000_000) == "1.23B"
+    assert compact_amount(45_600_000) == "45.6M"
+    assert compact_amount(-2_500_000) == "-2.50M"
+    assert compact_amount(None) == "—"
+
+
 def sig(date, symbol, direction, strategy="s", price=100.0):
     return Signal(date=date, symbol=symbol, strategy=strategy, direction=direction,
                   price=price, strength=0.5, reason="test reason")

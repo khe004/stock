@@ -2409,6 +2409,7 @@ def render_ai_infra():
         compute_growth_metrics,
         compute_lane_market_share,
         compute_lane_summary,
+        compact_amount,
         display_name,
         get_currency_for_symbol,
         to_usd_market_cap,
@@ -2858,7 +2859,12 @@ def render_ai_infra():
                     "fiscal_date": "财年结束日", "revenue": "营收",
                     "gross_profit": "毛利", "operating_income": "营业利润", "net_income": "净利润",
                 })
+                amount_cols = ["营收", "毛利", "营业利润", "净利润"]
+                for col in amount_cols:
+                    if col in fin_display.columns:
+                        fin_display[col] = fin_display[col].map(compact_amount)
                 st.dataframe(fin_display, width="stretch", hide_index=True)
+                st.caption("金额按原始财报单位缩写：M=百万，B=十亿，T=万亿；财报币种当前未单独存储。")
                 latest_gm = growth_metrics.get(detail_symbol)
                 if latest_gm:
                     st.caption(

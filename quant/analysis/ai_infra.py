@@ -163,6 +163,20 @@ def _is_positive(v) -> bool:
         return False
 
 
+def compact_amount(value) -> str:
+    """把财务金额缩写成易读的 K/M/B/T，缺失值显示破折号。"""
+    if value is None or _is_nan(value):
+        return "—"
+    number = float(value)
+    absolute = abs(number)
+    for threshold, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if absolute >= threshold:
+            scaled = number / threshold
+            decimals = 1 if abs(scaled) >= 10 else 2
+            return f"{scaled:,.{decimals}f}{suffix}"
+    return f"{number:,.0f}"
+
+
 # ---------------------------------------------------------------------------
 # 币种映射与多币种市值换算
 # ---------------------------------------------------------------------------
