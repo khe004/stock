@@ -25,7 +25,7 @@ def month_anchors(index: pd.DatetimeIndex, offset: int = 0) -> pd.DatetimeIndex:
     offset>0 是为【调仓日 timing luck 检验】准备的（Newfound / Hoffstein-Faber-Braun）：
     "锚在月首日"本身是个从未被检验的隐含选择，把锚点错开到第 6/11/16 个交易日
     （offset=5/10/15，≈4 个周度错峰 tranche）重跑，结果散布就是 timing luck 的幅度。
-    实测本平台年化跨度 133~569bp，最低的都超过文献典型值 100bp——所以这不是理论问题。
+    2026-09-16 复算本平台年化跨度 130~562bp，最低的也超过文献典型值 100bp——所以这不是理论问题。
     详见 quant/analysis/robustness.py 与 CLAUDE.md 关键设计决策 #9。
 
     当月交易日不足 offset+1 天的月份自动跳过（月末几天开市的残月）。
