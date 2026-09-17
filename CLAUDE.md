@@ -87,8 +87,8 @@ aggressive_mom 改持 BIL（1-3月短债 ETF，近零波动零久期，2007+ 全
    回撤形状而非风险调整效率——只报有利的那个指标就是虚高。
 4. **幸存者偏差**：`universe_sp500.yaml` 是今天的成分快照，绝对收益虚高；选股池按当时
    成交额逐月重建（point-in-time）缓解前视。回测页有剔除标的多选框做敏感性检验。
-5. **幂等**：signals 表 (date,symbol,strategy,direction) 唯一；未配置通知渠道=打印即视为
-   已送达；渠道失败才留待重试。**run_daily 默认只入库当天信号**（`s.date == as_of`），
+5. **幂等**：signals 表 (date,symbol,strategy,direction) 唯一；`notification_deliveries` 按渠道
+   记账，某渠道失败只重试该渠道；未配置渠道则视为已处理。**run_daily 默认只入库当天信号**（`s.date == as_of`），
    所以「信号历史」页只累积平台实际运行过且当天有信号的记录——初始化或找回历史用
    `--backfill`（全量历史信号入库并标记已通知，不倒灌推送）。
 6. **信号 reason 必须是人话**（含数值与理由），推送和面板直接展示。

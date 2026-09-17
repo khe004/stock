@@ -46,7 +46,7 @@
 ## 关键设计
 
 - **prices 表**：`(symbol, date)` 主键，OHLCV + adj_close；fetcher 查库内最新日期只拉增量。yfinance 静默失败返回空表时首次拉取报错而非当成功。
-- **signals 表**：`(date, symbol, strategy, direction)` 唯一约束实现幂等——重复运行不重复入库；`notified_at` 非空不重复推送。未配置通知渠道时打印到终端并视为已送达，网络失败才留待下次重试。`run_daily` 默认只入库当天信号，初始化用 `--backfill` 补全历史。
+- **signals 表**：`(date, symbol, strategy,direction)` 唯一约束实现幂等；`notification_deliveries` 按信号和渠道记录成功送达，失败渠道单独重试，不让已成功渠道重复收到。全部启用渠道完成后写 `notified_at`。`run_daily` 默认只入库当天信号，初始化用 `--backfill` 补全历史。
 - **策略接口**：`Strategy.generate(prices: dict[symbol, DataFrame]) -> list[Signal]`，对全部历史出信号；每日运行筛最新一天，回测用完整序列——同一套代码两处复用。
 - **总回报口径**：回测与动量计算一律用 `adj_close`（含分红再投资）——TLT 等收益大头在票息，close 会把结论算反；K 线展示与 `Signal.price` 用原始 close。
 - **月度调仓锚点**：`strategies.base.month_anchors(index, offset)`，默认每月首个交易日；`offset` 参数供调仓日 timing luck 检验错峰用。

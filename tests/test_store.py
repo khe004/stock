@@ -98,3 +98,16 @@ def test_mark_all_notified():
     assert store.unnotified_signals(conn) == []
     # 幂等：再次调用无未通知信号可标
     assert store.mark_all_notified(conn) == 0
+
+
+def test_notification_deliveries_are_idempotent_per_channel():
+    conn = store.connect(":memory:")
+    signals = [sig(date="2026-01-02")]
+    store.insert_signals(conn, signals)
+    signal_id = int(store.unnotified_signals(conn)[0]["id"])
+    store.mark_channel_delivered(conn, [signal_id], "telegram")
+    store.mark_channel_delivered(conn, [signal_id], "telegram")
+    assert store.delivered_signal_ids(conn, [signal_id], "telegram") == {signal_id}
+    assert store.delivered_signal_ids(conn, [signal_id], "email") == set()
+    count = conn.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0]
+    assert count == 1

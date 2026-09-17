@@ -99,6 +99,16 @@ CREATE TABLE IF NOT EXISTS research_updates (
     detail TEXT,
     PRIMARY KEY (symbol, data_type)
 );
+CREATE TABLE IF NOT EXISTS research_update_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    data_type TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_update_runs
+    ON research_update_runs(symbol, data_type, checked_at);
 """
 
 SCHEMA_FINANCIAL_FACTS = """
@@ -165,6 +175,16 @@ CREATE INDEX IF NOT EXISTS idx_business_evidence_symbol
 CREATE TABLE IF NOT EXISTS research_view_state (
     symbol TEXT PRIMARY KEY,
     last_viewed_at TEXT NOT NULL
+);
+"""
+
+SCHEMA_NOTIFICATION_DELIVERIES = """
+CREATE TABLE IF NOT EXISTS notification_deliveries (
+    signal_id INTEGER NOT NULL,
+    channel TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY (signal_id, channel),
+    FOREIGN KEY (signal_id) REFERENCES signals(id)
 );
 """
 
@@ -248,6 +268,7 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.executescript(SCHEMA_RESEARCH_UPDATES)
     conn.executescript(SCHEMA_FINANCIAL_FACTS)
     conn.executescript(SCHEMA_RESEARCH_RECORDS)
+    conn.executescript(SCHEMA_NOTIFICATION_DELIVERIES)
     _migrate(conn)
     return conn
 
@@ -347,6 +368,9 @@ def record_research_update(conn: sqlite3.Connection, symbol: str, data_type: str
     conn.execute("""INSERT OR REPLACE INTO research_updates
         (symbol, data_type, checked_at, status, detail) VALUES (?, ?, ?, ?, ?)""",
         (symbol, data_type, checked_at, status, detail))
+    conn.execute("""INSERT INTO research_update_runs
+        (symbol, data_type, checked_at, status, detail) VALUES (?, ?, ?, ?, ?)""",
+        (symbol, data_type, checked_at, status, detail))
     conn.commit()
 
 
@@ -357,6 +381,16 @@ def load_research_updates(conn: sqlite3.Connection, symbols: list[str]) -> pd.Da
     return pd.read_sql_query(
         f"SELECT * FROM research_updates WHERE symbol IN ({placeholders})",
         conn, params=symbols)
+
+
+def load_research_update_runs(conn: sqlite3.Connection, symbol: str | None = None) -> pd.DataFrame:
+    query = "SELECT * FROM research_update_runs"
+    params: list[str] = []
+    if symbol:
+        query += " WHERE symbol = ?"
+        params.append(symbol)
+    query += " ORDER BY id DESC"
+    return pd.read_sql_query(query, conn, params=params)
 
 
 def insert_financial_snapshot(conn: sqlite3.Connection, metadata: dict,
@@ -496,6 +530,31 @@ def mark_notified(conn: sqlite3.Connection, ids: list[int]) -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     conn.executemany("UPDATE signals SET notified_at = ? WHERE id = ?", [(now, i) for i in ids])
     conn.commit()
+
+
+def mark_channel_delivered(conn: sqlite3.Connection, ids: list[int], channel: str) -> None:
+    """记录某一渠道已成功送达；重复调用幂等。"""
+    if not ids:
+        return
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.executemany(
+        """INSERT OR IGNORE INTO notification_deliveries
+           (signal_id, channel, delivered_at) VALUES (?, ?, ?)""",
+        [(signal_id, channel, now) for signal_id in ids],
+    )
+    conn.commit()
+
+
+def delivered_signal_ids(conn: sqlite3.Connection, ids: list[int], channel: str) -> set[int]:
+    if not ids:
+        return set()
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"""SELECT signal_id FROM notification_deliveries
+            WHERE channel = ? AND signal_id IN ({placeholders})""",
+        [channel, *ids],
+    ).fetchall()
+    return {int(row["signal_id"]) for row in rows}
 
 
 def load_signals(

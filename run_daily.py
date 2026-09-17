@@ -36,14 +36,21 @@ def setup_logging() -> None:
 
 
 def dispatch(cfg, subject: str, text: str) -> bool:
-    """把消息发到所有启用渠道，全部送达才返回 True。
-    某渠道失败时信号保持未通知，下次运行整体重发（成功过的渠道会收到重复）。"""
+    """发送不需要逐信号记账的普通消息（例如数据失败提醒）。"""
     ok = True
     if cfg.telegram_enabled:
         ok = telegram.send_message(text) and ok
     if cfg.email_enabled:
         ok = email.send_email(subject, text) and ok
     return ok
+
+
+def send_channel(channel: str, subject: str, text: str) -> bool:
+    if channel == "telegram":
+        return telegram.send_message(text)
+    if channel == "email":
+        return email.send_email(subject, text)
+    raise ValueError(f"未知通知渠道: {channel}")
 
 
 def format_message(rows) -> str:
@@ -255,17 +262,40 @@ def main(argv: list[str] | None = None) -> int:
             store.mark_notified(conn, [r["id"] for r in observe_rows])
             log.info("仅观察策略 %d 条信号已入库不推送", len(observe_rows))
 
-        # 每日邮件 = 市场概览 + 可推送信号（保证每天一封）
-        signal_text = (format_message(notify_rows) if notify_rows
-                       else f"📭 今日无新信号（{as_of}）")
-        body = signal_text + "\n\n" + build_market_overview(prices, cfg)
-        subject = (f"📈 投资日报 {as_of}（{len(notify_rows)} 条信号）" if notify_rows
-                   else f"📊 投资日报 {as_of}（市场概览）")
-        ok = dispatch(cfg, subject, body)
-        if ok and notify_rows:
-            store.mark_notified(conn, [r["id"] for r in notify_rows])
-        log.info("每日邮件已发送%s（%d 条可推信号）",
-                 "" if ok else "（部分渠道失败，下次重试）", len(notify_rows))
+        overview = build_market_overview(prices, cfg)
+        channels = (["telegram"] if cfg.telegram_enabled else []) + (
+            ["email"] if cfg.email_enabled else [])
+        if notify_rows:
+            signal_ids = [int(r["id"]) for r in notify_rows]
+            if not channels:
+                store.mark_notified(conn, signal_ids)
+                log.info("未配置通知渠道，%d 条信号视为已处理", len(signal_ids))
+            else:
+                for channel in channels:
+                    delivered = store.delivered_signal_ids(conn, signal_ids, channel)
+                    channel_rows = [r for r in notify_rows if int(r["id"]) not in delivered]
+                    if not channel_rows:
+                        log.info("%s 已送达全部待处理信号，跳过重复发送", channel)
+                        continue
+                    body = format_message(channel_rows) + "\n\n" + overview
+                    subject = f"📈 投资日报 {as_of}（{len(channel_rows)} 条信号）"
+                    if send_channel(channel, subject, body):
+                        store.mark_channel_delivered(
+                            conn, [int(r["id"]) for r in channel_rows], channel)
+                    else:
+                        log.warning("%s 发送失败，保留该渠道待重试", channel)
+                completed = []
+                for signal_id in signal_ids:
+                    if all(signal_id in store.delivered_signal_ids(conn, [signal_id], channel)
+                           for channel in channels):
+                        completed.append(signal_id)
+                store.mark_notified(conn, completed)
+                log.info("渠道级通知完成 %d/%d 条", len(completed), len(signal_ids))
+        else:
+            body = f"📭 今日无新信号（{as_of}）\n\n" + overview
+            subject = f"📊 投资日报 {as_of}（市场概览）"
+            ok = dispatch(cfg, subject, body)
+            log.info("无信号日报发送%s", "成功" if ok else "失败")
         if failed:
             shown = ", ".join(failed[:20]) + (f" 等 {len(failed)} 个" if len(failed) > 20 else "")
             dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {shown}，信号可能不完整")

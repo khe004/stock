@@ -16,6 +16,17 @@ def test_status_shows_missing_stale_and_last_failure():
     assert status.at["AMKR", "财报抓取时间状态"] == "缺失"
 
 
+def test_research_update_keeps_latest_status_and_append_only_history():
+    conn = store.connect(":memory:")
+    store.record_research_update(conn, "NVDA", "quarterly", "failed", "timeout")
+    store.record_research_update(conn, "NVDA", "quarterly", "updated", "ok")
+    latest = store.load_research_updates(conn, ["NVDA"])
+    history = store.load_research_update_runs(conn, "NVDA")
+    assert len(latest) == 1
+    assert latest.iloc[0]["status"] == "updated"
+    assert list(history["status"]) == ["updated", "failed"]
+
+
 def test_force_fundamentals_rechecks_existing_today(monkeypatch):
     conn = store.connect(":memory:")
     store.upsert_fundamentals(conn, "NVDA", "2026-09-15", "t1", {"forward_pe": 20}, {})
