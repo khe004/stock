@@ -538,6 +538,37 @@ def test_valuation_warning_flags_extremes_without_dropping_values():
     assert valuation_warning(None, None, None) == ""
 
 
+def test_valuation_history_and_percentile_preserve_snapshot_boundaries():
+    from quant.analysis.ai_infra import historical_percentile, valuation_history
+
+    snapshots = pd.DataFrame({
+        "symbol": ["A", "A", "A", "B"],
+        "date": ["2026-07-01", "2026-08-01", "2026-09-01", "2026-09-01"],
+        "forward_pe": [20.0, None, 30.0, 10.0],
+        "ev_to_ebitda": [12.0, 15.0, None, 8.0],
+        "price_to_sales": [5.0, -1.0, 7.0, 2.0],
+    })
+    history = valuation_history(snapshots, "A")
+    assert pd.isna(history.loc[pd.Timestamp("2026-08-01"), "forward_pe"])
+    assert pd.isna(history.loc[pd.Timestamp("2026-08-01"), "price_to_sales"])
+    stats = historical_percentile(history["forward_pe"])
+    assert stats == {"percentile": 1.0, "sample_count": 2,
+                     "start": "2026-07-01", "end": "2026-09-01"}
+
+
+def test_peer_valuation_percentile_rewards_lower_multiples_and_skips_missing():
+    from quant.analysis.ai_infra import peer_valuation_percentile
+
+    frame = pd.DataFrame({
+        "forward PE": [10.0, 20.0, None],
+        "EV/EBITDA": [8.0, 16.0, 12.0],
+        "P/S": [2.0, 4.0, None],
+    }, index=["cheap", "expensive", "partial"])
+    score = peer_valuation_percentile(frame)
+    assert score["cheap"] > score["expensive"]
+    assert pd.notna(score["partial"])
+
+
 def _fin_df(rows):
     """构造 financials DataFrame 用于测试。
     rows = [(fiscal_date, revenue, gross_profit, operating_income, net_income), ...]

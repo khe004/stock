@@ -323,6 +323,53 @@ def valuation_warning(forward_pe: float | None, ev_to_ebitda: float | None,
     return "⚠️ 待核实：" + "、".join(flags) if flags else ""
 
 
+def valuation_history(fundamentals: pd.DataFrame, symbol: str) -> pd.DataFrame:
+    """返回公司的有效估值快照；不跨日期补空值。"""
+    columns = ["forward_pe", "ev_to_ebitda", "price_to_sales"]
+    if fundamentals.empty or "symbol" not in fundamentals.columns:
+        return pd.DataFrame(columns=columns)
+    work = fundamentals[fundamentals["symbol"] == symbol].copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+    work["date"] = pd.to_datetime(work["date"])
+    work = work.set_index("date").sort_index()
+    available = [column for column in columns if column in work.columns]
+    out = work[available].apply(pd.to_numeric, errors="coerce")
+    # 负分母对应的倍数没有估值含义；保留极端正值供页面打标，不缩尾。
+    out = out.where(out > 0)
+    return out.dropna(how="all")
+
+
+def historical_percentile(series: pd.Series) -> dict:
+    """当前值在已有快照中的百分位，并明确返回样本范围。"""
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    values = values[values > 0]
+    if values.empty:
+        return {"percentile": None, "sample_count": 0, "start": None, "end": None}
+    current = float(values.iloc[-1])
+    percentile = float((values <= current).mean())
+    index = pd.to_datetime(values.index)
+    return {
+        "percentile": percentile,
+        "sample_count": int(len(values)),
+        "start": index.min().strftime("%Y-%m-%d"),
+        "end": index.max().strftime("%Y-%m-%d"),
+    }
+
+
+def peer_valuation_percentile(frame: pd.DataFrame) -> pd.Series:
+    """同一赛道内按可用估值倍数计算便宜分位；倍数越低分越高。"""
+    metrics = [column for column in ("forward PE", "EV/EBITDA", "P/S")
+               if column in frame.columns]
+    if not metrics:
+        return pd.Series(index=frame.index, dtype=float)
+    ranks = []
+    for column in metrics:
+        values = pd.to_numeric(frame[column], errors="coerce").where(lambda item: item > 0)
+        ranks.append(values.rank(pct=True, ascending=False, method="average"))
+    return pd.concat(ranks, axis=1).mean(axis=1, skipna=True)
+
+
 # ---------------------------------------------------------------------------
 # 2.3 赛道汇总
 # ---------------------------------------------------------------------------

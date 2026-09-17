@@ -2407,6 +2407,7 @@ def render_ai_infra():
         compact_amount,
         display_name,
         get_currency_for_symbol,
+        peer_valuation_percentile,
         to_usd_market_cap,
         valuation_warning,
     )
@@ -2750,6 +2751,7 @@ def render_ai_infra():
             })
 
         detail_df = pd.DataFrame(detail_rows)
+        detail_df["AI赛道便宜分位"] = peer_valuation_percentile(detail_df)
 
         sort_options = ["市值", "12-1动量", "近1月", "营收同比(季)",
                         "forward PE", "EV/EBITDA", "P/S"]
@@ -2769,7 +2771,8 @@ def render_ai_infra():
         # 同概览表：百分比列 ×100 保数值排序 + 保住正负号；市值单位写进列名
         display_detail = detail_df.copy()
         signed_cols = ["营收CAGR", "营收同比(季)", "12-1动量", "近1月"]  # 可能为负，带 +/- 号
-        plain_cols = ["市值份额", "毛利率", "净利率", "价值分位"]  # 恒非负，不需要 + 号
+        plain_cols = ["市值份额", "毛利率", "净利率", "价值分位",
+                      "AI赛道便宜分位"]  # 恒非负，不需要 + 号
         for c in signed_cols + plain_cols:
             if c in display_detail.columns:
                 display_detail[c] = display_detail[c] * 100
@@ -2785,6 +2788,12 @@ def render_ai_infra():
                 **{c: st.column_config.NumberColumn(c, format="%.1f%%")
                    for c in plain_cols if c in display_detail.columns},
             },
+        )
+        lane_value_n = int(detail_df["AI赛道便宜分位"].notna().sum())
+        st.caption(
+            f"「价值分位」= S&P500 完整行业母集；「AI赛道便宜分位」= 当前 {selected_lane} "
+            f"成分内按 forward PE、EV/EBITDA、P/S 可用项计算（有效 n={lane_value_n}）；"
+            "公司自身历史分位见下方估值历史。三种分位母集不同，不能混称。"
         )
 
         missing_research = [
@@ -2995,6 +3004,107 @@ def render_ai_infra():
                 f"无行业内价值分位——价值分位为空、备注列标「池外」。这是池外标的的已知代价，"
                 f"不影响其他指标的准确性。"
             )
+
+        # ── 同业比较与估值快照历史（阶段 3 首版）──
+        from quant.analysis.ai_infra import historical_percentile, valuation_history
+
+        st.subheader("同业比较与估值历史")
+        st.caption(
+            "可跨赛道选择 2–5 家研究标的。全行业价值分位仍来自 S&P500 行业内比较；"
+            "这里的历史分位只使用本机实际保存的快照，不用今天的预测回填过去。"
+        )
+        compare_options = [s for s in cfg.research_symbols if s in latest_fund.index]
+        default_compare = [s for s in lane_syms if s in latest_fund.index][:3]
+        compare_symbols = st.multiselect(
+            "选择 2–5 家公司", compare_options, default=default_compare,
+            max_selections=5, key="ai_peer_compare",
+            format_func=lambda x: f"{names.get(x, x)}（{x}）" if x in names else x,
+        )
+        if len(compare_symbols) < 2:
+            st.info("至少选择两家公司才能进行同业比较。")
+        else:
+            compare_rows = []
+            for symbol in compare_symbols:
+                row = latest_fund.loc[symbol]
+                gm = growth_metrics.get(symbol)
+                qframe = store.load_latest_quarterly_financials(conn, symbol)
+                qm = compute_quarterly_metrics(qframe) if not qframe.empty else None
+                compare_rows.append({
+                    "代码": symbol,
+                    "快照日期": row.get("date"),
+                    "营收同比(季)": row.get("revenue_growth"),
+                    "年度营收CAGR": gm.revenue_cagr if gm else None,
+                    "毛利率": (qm.gross_margin if qm and qm.gross_margin is not None
+                              else (gm.gross_margin if gm else None)),
+                    "营业利润率": qm.operating_margin if qm else None,
+                    "净利率": gm.net_margin if gm else None,
+                    "forward PE": row.get("forward_pe"),
+                    "EV/EBITDA": row.get("ev_to_ebitda"),
+                    "P/S": row.get("price_to_sales"),
+                    "现金": qm.cash if qm else None,
+                    "有息债务": qm.total_debt if qm else None,
+                    "财报币种": qframe.attrs.get("currency") if not qframe.empty else None,
+                })
+            compare_df = pd.DataFrame(compare_rows)
+            percent_cols = ["营收同比(季)", "年度营收CAGR", "毛利率", "营业利润率", "净利率"]
+            compare_display = compare_df.copy()
+            for column in percent_cols:
+                compare_display[column] = pd.to_numeric(
+                    compare_display[column], errors="coerce") * 100
+            st.dataframe(
+                compare_display, width="stretch", hide_index=True,
+                column_config={
+                    **{c: st.column_config.NumberColumn(c, format="%+.1f%%")
+                       for c in percent_cols},
+                    **{c: st.column_config.NumberColumn(c, format="%.1f")
+                       for c in ("forward PE", "EV/EBITDA", "P/S")},
+                    **{c: st.column_config.NumberColumn(c, format="compact")
+                       for c in ("现金", "有息债务")},
+                },
+            )
+            scatter = compare_df.dropna(subset=["营收同比(季)", "EV/EBITDA"])
+            if len(scatter) >= 2:
+                fig = go.Figure(go.Scatter(
+                    x=scatter["营收同比(季)"], y=scatter["EV/EBITDA"],
+                    mode="markers+text", text=scatter["代码"], textposition="top center",
+                    marker=dict(size=12),
+                ))
+                fig.update_layout(
+                    height=330, margin=dict(l=10, r=10, t=30, b=10),
+                    xaxis_title="最新季度营收同比", yaxis_title="EV/EBITDA（越低通常越便宜）",
+                    xaxis_tickformat="+.0%",
+                )
+                st.plotly_chart(fig, width="stretch")
+
+        history = valuation_history(fdf, detail_symbol)
+        if history.empty:
+            st.info(f"{detail_symbol} 尚无有效估值历史快照。")
+        else:
+            history_fig = go.Figure()
+            history_labels = {
+                "forward_pe": "forward PE", "ev_to_ebitda": "EV/EBITDA",
+                "price_to_sales": "P/S",
+            }
+            for column, label in history_labels.items():
+                if column in history and history[column].notna().any():
+                    history_fig.add_trace(go.Scatter(
+                        x=history.index, y=history[column], mode="lines+markers", name=label))
+            history_fig.update_layout(
+                height=330, margin=dict(l=10, r=10, t=30, b=10),
+                title=f"{detail_symbol} 估值快照历史（实际保存区间）", yaxis_title="倍数",
+            )
+            st.plotly_chart(history_fig, width="stretch")
+            summaries = []
+            for column, label in history_labels.items():
+                if column not in history:
+                    continue
+                stats = historical_percentile(history[column])
+                if stats["sample_count"]:
+                    summaries.append(
+                        f"{label} 当前历史分位 {stats['percentile']:.0%}"
+                        f"（n={stats['sample_count']}，{stats['start']} 至 {stats['end']}）"
+                    )
+            st.caption("；".join(summaries) + "。样本较短时只表示已存观察点，不称为五年分位。")
 
 
 PAGES = {
