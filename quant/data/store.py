@@ -161,6 +161,11 @@ CREATE TABLE IF NOT EXISTS business_evidence_versions (
 );
 CREATE INDEX IF NOT EXISTS idx_business_evidence_symbol
     ON business_evidence_versions(symbol, created_at);
+
+CREATE TABLE IF NOT EXISTS research_view_state (
+    symbol TEXT PRIMARY KEY,
+    last_viewed_at TEXT NOT NULL
+);
 """
 
 
@@ -268,6 +273,15 @@ def load_research_notes(conn: sqlite3.Connection, symbol: str) -> pd.DataFrame:
         conn, params=[symbol])
 
 
+def load_latest_research_notes(conn: sqlite3.Connection) -> pd.DataFrame:
+    """每家公司只返回最新研究判断版本。"""
+    return pd.read_sql_query(
+        """SELECT n.* FROM research_note_versions AS n
+           JOIN (SELECT symbol, MAX(id) AS id FROM research_note_versions GROUP BY symbol) latest
+             ON latest.id = n.id
+           ORDER BY n.status, n.symbol""", conn)
+
+
 def save_business_evidence(conn: sqlite3.Connection, symbol: str, metric_name: str,
                            source_url: str, value_text: str = "", period: str = "",
                            unit: str = "", published_at: str = "", excerpt: str = "",
@@ -292,6 +306,39 @@ def load_business_evidence(conn: sqlite3.Connection, symbol: str) -> pd.DataFram
     return pd.read_sql_query(
         "SELECT * FROM business_evidence_versions WHERE symbol = ? ORDER BY id DESC",
         conn, params=[symbol])
+
+
+def mark_research_viewed(conn: sqlite3.Connection, symbol: str,
+                         viewed_at: str | None = None) -> str:
+    viewed_at = viewed_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT INTO research_view_state(symbol, last_viewed_at) VALUES (?, ?)
+           ON CONFLICT(symbol) DO UPDATE SET last_viewed_at = excluded.last_viewed_at""",
+        (symbol, viewed_at),
+    )
+    conn.commit()
+    return viewed_at
+
+
+def research_changes_since_view(conn: sqlite3.Connection, symbol: str) -> list[dict]:
+    """返回上次查看后新增的数据/证据；查询派生事件天然不会重复入库。"""
+    row = conn.execute(
+        "SELECT last_viewed_at FROM research_view_state WHERE symbol = ?", (symbol,)
+    ).fetchone()
+    since = row["last_viewed_at"] if row else None
+    changes: list[dict] = []
+    sources = [
+        ("基本面快照", "SELECT MAX(captured_at) d FROM fundamentals WHERE symbol = ?"),
+        ("年度财报", "SELECT MAX(captured_at) d FROM financials WHERE symbol = ?"),
+        ("季度三表", "SELECT MAX(captured_at) d FROM financial_statement_snapshots WHERE symbol = ?"),
+        ("业务证据", "SELECT MAX(created_at) d FROM business_evidence_versions WHERE symbol = ?"),
+        ("研究判断", "SELECT MAX(created_at) d FROM research_note_versions WHERE symbol = ?"),
+    ]
+    for label, query in sources:
+        latest = conn.execute(query, (symbol,)).fetchone()["d"]
+        if latest and (since is None or latest > since):
+            changes.append({"类型": label, "时间": latest})
+    return changes
 
 
 def record_research_update(conn: sqlite3.Connection, symbol: str, data_type: str,

@@ -2498,6 +2498,30 @@ def render_ai_infra():
         st.dataframe(problem, width="stretch", hide_index=True)
         st.caption("刷新示例：python run_daily.py --research-only --symbols NVDA --force")
 
+    latest_notes = store.load_latest_research_notes(conn)
+    with st.expander(f"关注列表与变化复核（{len(latest_notes)} 只）", expanded=False):
+        if latest_notes.empty:
+            st.caption("尚未关注公司。在公司详情的“研究记录与业务证据”中保存状态后会出现在这里。")
+        else:
+            watch_columns = ["symbol", "status", "thesis", "risks", "next_check", "created_at"]
+            watch = latest_notes[[column for column in watch_columns
+                                  if column in latest_notes.columns]].rename(columns={
+                "symbol": "代码", "status": "状态", "thesis": "观察理由",
+                "risks": "风险", "next_check": "下次核查", "created_at": "更新时间",
+            })
+            st.dataframe(watch, width="stretch", hide_index=True)
+            summary_lines = []
+            for note in latest_notes.itertuples():
+                changes = store.research_changes_since_view(conn, note.symbol)
+                if changes:
+                    summary_lines.append(
+                        f"- {note.symbol}（{note.status}）："
+                        + "、".join(item["类型"] for item in changes)
+                    )
+            st.markdown("**研究摘要预览（不会发送）**")
+            st.code("\n".join(summary_lines) if summary_lines else "当前无上次查看后的变化。")
+            st.caption("邮件/Telegram 研究摘要尚未启用；先在站内预览，避免重复或误报。")
+
     # ── 加载数据 ──
     with st.spinner("加载行情、基本面和财报数据…"):
         # 行情
@@ -2987,6 +3011,17 @@ def render_ai_infra():
                     )
 
             with st.expander("研究记录与业务证据", expanded=False):
+                changes = store.research_changes_since_view(conn, detail_symbol)
+                if changes:
+                    st.markdown("**自上次查看后的变化**")
+                    st.dataframe(pd.DataFrame(changes), width="stretch", hide_index=True)
+                else:
+                    st.caption("自上次查看后没有新的已存数据或研究记录。")
+                if st.button("标记为已查看", key=f"mark_viewed_{detail_symbol}"):
+                    store.mark_research_viewed(conn, detail_symbol)
+                    st.success("已记录本次查看时间。")
+                    st.rerun()
+
                 notes = store.load_research_notes(conn, detail_symbol)
                 latest_note = notes.iloc[0] if not notes.empty else None
                 if latest_note is not None:

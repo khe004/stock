@@ -29,3 +29,17 @@ def test_business_evidence_requires_source_and_keeps_metadata():
     assert evidence.iloc[0]["id"] == evidence_id
     assert evidence.iloc[0]["verification_status"] == "已核验"
     assert evidence.iloc[0]["source_url"] == "https://example.test/filing"
+
+
+def test_latest_notes_and_changes_since_view_are_deduplicated_queries():
+    conn = store.connect(":memory:")
+    store.save_research_note(conn, "NVDA", "待研究", thesis="v1")
+    store.save_research_note(conn, "NVDA", "跟踪", thesis="v2")
+    latest = store.load_latest_research_notes(conn)
+    assert len(latest) == 1
+    assert latest.iloc[0]["thesis"] == "v2"
+
+    before = store.research_changes_since_view(conn, "NVDA")
+    assert [item["类型"] for item in before] == ["研究判断"]
+    store.mark_research_viewed(conn, "NVDA", "9999-01-01T00:00:00+00:00")
+    assert store.research_changes_since_view(conn, "NVDA") == []
