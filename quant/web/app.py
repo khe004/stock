@@ -2986,6 +2986,82 @@ def render_ai_infra():
                         f"{_metric_text(latest_gm.net_margin, '.1%')}。"
                     )
 
+            with st.expander("研究记录与业务证据", expanded=False):
+                notes = store.load_research_notes(conn, detail_symbol)
+                latest_note = notes.iloc[0] if not notes.empty else None
+                if latest_note is not None:
+                    st.markdown(
+                        f"**当前状态：{latest_note['status']}**  "
+                        f"（版本时间 {latest_note['created_at']}）"
+                    )
+                    if latest_note.get("thesis"):
+                        st.write("观察理由：" + latest_note["thesis"])
+                    if latest_note.get("assumptions"):
+                        st.write("关键假设：" + latest_note["assumptions"])
+                    if latest_note.get("risks"):
+                        st.write("风险：" + latest_note["risks"])
+                    if latest_note.get("next_check"):
+                        st.write("下次核查：" + latest_note["next_check"])
+                else:
+                    st.caption("尚未保存人工研究判断。")
+
+                with st.form(f"research_note_{detail_symbol}"):
+                    status_options = ["待研究", "跟踪", "暂缓"]
+                    current_status = (latest_note["status"] if latest_note is not None
+                                      and latest_note["status"] in status_options else "待研究")
+                    note_status = st.selectbox(
+                        "观察状态", status_options, index=status_options.index(current_status))
+                    note_thesis = st.text_area(
+                        "观察理由", value=latest_note["thesis"] if latest_note is not None else "")
+                    note_assumptions = st.text_area(
+                        "关键假设", value=latest_note["assumptions"] if latest_note is not None else "")
+                    note_risks = st.text_area(
+                        "主要风险", value=latest_note["risks"] if latest_note is not None else "")
+                    note_next = st.text_area(
+                        "下次核查项", value=latest_note["next_check"] if latest_note is not None else "")
+                    note_source = st.text_input(
+                        "判断来源链接（可选）",
+                        value=latest_note["source_url"] if latest_note is not None else "")
+                    if st.form_submit_button("保存新版本"):
+                        store.save_research_note(
+                            conn, detail_symbol, note_status, note_thesis, note_assumptions,
+                            note_risks, note_next, note_source)
+                        st.success("研究判断已保存为新版本。")
+                        st.rerun()
+
+                if len(notes) > 1:
+                    st.caption(f"历史版本共 {len(notes)} 个；每次保存均新增版本，不覆盖旧记录。")
+                    st.dataframe(notes, width="stretch", hide_index=True)
+
+                evidence = store.load_business_evidence(conn, detail_symbol)
+                st.markdown("**业务证据**")
+                if evidence.empty:
+                    st.caption("暂无业务证据。这里只保存可追溯事实，不自动生成 AI 收入占比。")
+                else:
+                    st.dataframe(
+                        evidence, width="stretch", hide_index=True,
+                        column_config={"source_url": st.column_config.LinkColumn("来源")},
+                    )
+                with st.form(f"business_evidence_{detail_symbol}"):
+                    ev_metric = st.text_input("指标名称", placeholder="例如：数据中心收入、订单积压")
+                    ev_value = st.text_input("披露值", placeholder="例如：$89.0B")
+                    ev_period = st.text_input("报告期", placeholder="例如：2026Q2")
+                    ev_unit = st.text_input("单位/币种", placeholder="例如：USD")
+                    ev_published = st.text_input("发布日期", placeholder="YYYY-MM-DD；未知可留空")
+                    ev_source = st.text_input("来源链接（必填）")
+                    ev_excerpt = st.text_area("原文摘录或定位")
+                    ev_verified = st.selectbox("核验状态", ["待核验", "已核验", "有争议"])
+                    if st.form_submit_button("添加业务证据"):
+                        if not ev_metric.strip() or not ev_source.strip():
+                            st.error("指标名称和来源链接必须填写。")
+                        else:
+                            store.save_business_evidence(
+                                conn, detail_symbol, ev_metric, ev_source, ev_value,
+                                ev_period, ev_unit, ev_published, ev_excerpt,
+                                "人工", ev_verified)
+                            st.success("业务证据已保存。")
+                            st.rerun()
+
         # CAGR 断崖说明：只有本赛道真有标的被标记时才出现，避免刷屏
         broken = [r["代码"] for r in detail_rows if r["CAGR备注"]]
         if broken:

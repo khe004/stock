@@ -130,6 +130,39 @@ CREATE TABLE IF NOT EXISTS financial_facts (
 );
 """
 
+SCHEMA_RESEARCH_RECORDS = """
+CREATE TABLE IF NOT EXISTS research_note_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    thesis TEXT,
+    assumptions TEXT,
+    risks TEXT,
+    next_check TEXT,
+    source_url TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_research_notes_symbol
+    ON research_note_versions(symbol, created_at);
+
+CREATE TABLE IF NOT EXISTS business_evidence_versions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    metric_name TEXT NOT NULL,
+    value_text TEXT,
+    period TEXT,
+    unit TEXT,
+    published_at TEXT,
+    source_url TEXT NOT NULL,
+    excerpt TEXT,
+    entry_method TEXT NOT NULL,
+    verification_status TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_business_evidence_symbol
+    ON business_evidence_versions(symbol, created_at);
+"""
+
 
 # 迁移用：两张表的期望列。老版本库（早期在用户机器上重建过的 schema）可能缺列
 PRICES_COL_TYPES = {
@@ -209,8 +242,56 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.executescript(SCHEMA_FINANCIALS)
     conn.executescript(SCHEMA_RESEARCH_UPDATES)
     conn.executescript(SCHEMA_FINANCIAL_FACTS)
+    conn.executescript(SCHEMA_RESEARCH_RECORDS)
     _migrate(conn)
     return conn
+
+
+def save_research_note(conn: sqlite3.Connection, symbol: str, status: str,
+                       thesis: str = "", assumptions: str = "", risks: str = "",
+                       next_check: str = "", source_url: str = "") -> int:
+    """新增一个研究判断版本；从不覆盖历史版本。"""
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cursor = conn.execute(
+        """INSERT INTO research_note_versions
+           (symbol, status, thesis, assumptions, risks, next_check, source_url, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (symbol, status, thesis, assumptions, risks, next_check, source_url, created_at),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def load_research_notes(conn: sqlite3.Connection, symbol: str) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT * FROM research_note_versions WHERE symbol = ? ORDER BY id DESC",
+        conn, params=[symbol])
+
+
+def save_business_evidence(conn: sqlite3.Connection, symbol: str, metric_name: str,
+                           source_url: str, value_text: str = "", period: str = "",
+                           unit: str = "", published_at: str = "", excerpt: str = "",
+                           entry_method: str = "人工", verification_status: str = "待核验") -> int:
+    """新增一条业务证据版本；source_url 必填以保证可追溯。"""
+    if not source_url.strip():
+        raise ValueError("业务证据必须提供来源链接")
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cursor = conn.execute(
+        """INSERT INTO business_evidence_versions
+           (symbol, metric_name, value_text, period, unit, published_at, source_url,
+            excerpt, entry_method, verification_status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (symbol, metric_name, value_text, period, unit, published_at, source_url,
+         excerpt, entry_method, verification_status, created_at),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def load_business_evidence(conn: sqlite3.Connection, symbol: str) -> pd.DataFrame:
+    return pd.read_sql_query(
+        "SELECT * FROM business_evidence_versions WHERE symbol = ? ORDER BY id DESC",
+        conn, params=[symbol])
 
 
 def record_research_update(conn: sqlite3.Connection, symbol: str, data_type: str,
