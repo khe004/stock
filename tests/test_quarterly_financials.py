@@ -1,8 +1,14 @@
 import pandas as pd
 import pytest
+import run_daily
 
 from quant.analysis.quarterly import compute_quarterly_metrics, describe_quarterly_change
-from quant.analysis.quarterly_validation import official_baseline_facts, validate_quarterly_sample
+from quant.analysis.quarterly_validation import (
+    OFFICIAL_FALLBACK_SOURCE,
+    apply_official_quarterly_fallbacks,
+    official_baseline_facts,
+    validate_quarterly_sample,
+)
 from quant.config import load_config
 from quant.data import fetcher, store
 
@@ -37,8 +43,10 @@ def test_financial_snapshots_keep_versions_and_latest_nulls():
 
 def test_fetch_and_normalize_quarterly_statements(monkeypatch):
     periods = pd.to_datetime(["2026-06-30", "2026-03-31"])
-    income = pd.DataFrame([[120, 100], [72, 55]],
-                          index=["Total Revenue", "Gross Profit"], columns=periods)
+    income = pd.DataFrame([[120, 100], [72, 55], [31, 27], [20, 18]],
+                          index=["Total Revenue", "Gross Profit", "Normalized EBITDA",
+                                 "Funds From Operations"],
+                          columns=periods)
     balance = pd.DataFrame([[40, 35], [20, 22]],
                            index=["Cash And Cash Equivalents", "Total Debt"], columns=periods)
     cashflow = pd.DataFrame([[30, 25], [-10, -8]],
@@ -58,6 +66,9 @@ def test_fetch_and_normalize_quarterly_statements(monkeypatch):
     assert result["currency"] == "TWD"
     assert result["trading_currency"] == "USD"
     assert any(f["metric"] == "revenue" and f["value"] == 120 for f in facts)
+    assert any(f["metric"] == "ebitda" and f["value"] == 31 for f in facts)
+    assert any(f["metric"] == "funds_from_operations" and f["value"] == 20
+               for f in facts)
     assert any(f["metric"] == "cash" and f["raw_label"] == "Cash And Cash Equivalents"
                for f in facts)
 
@@ -136,3 +147,84 @@ def test_official_baseline_facts_only_imports_verified_fields():
     assert {item["metric"] for item in facts} == {"revenue", "operating_cash_flow"}
     assert {item["statement"] for item in facts} == {"income", "cashflow"}
     assert all(item["raw_label"] == "official_verified_baseline" for item in facts)
+
+
+def test_official_fallback_is_minimal_and_idempotent():
+    conn = store.connect(":memory:")
+    baseline = {
+        "period_end": "2026-06-30", "published_at": "2026-07-23",
+        "currency": "USD", "trading_currency": "USD",
+        "source_url": "https://example.test/official",
+        "metrics": {"revenue": 100.0, "net_income": 20.0},
+    }
+    first = apply_official_quarterly_fallbacks(
+        conn, {"DLR": baseline}, captured_at="2026-09-17T10:00:00+00:00")
+    assert first["DLR"][0] == "verified_fallback"
+    frame = store.load_latest_quarterly_financials(conn, "DLR")
+    assert list(frame.index) == ["2026-06-30"]
+    assert set(frame.columns) == {"revenue", "net_income"}
+    assert frame.attrs["source"] == OFFICIAL_FALLBACK_SOURCE
+    assert frame.attrs["published_at"] == "2026-07-23"
+    assert frame.attrs["trading_currency"] == "USD"
+
+    second = apply_official_quarterly_fallbacks(
+        conn, {"DLR": baseline}, captured_at="2026-09-17T11:00:00+00:00")
+    assert second["DLR"][0] == "verified"
+    count = conn.execute(
+        "SELECT COUNT(*) FROM financial_statement_snapshots WHERE symbol = 'DLR'"
+    ).fetchone()[0]
+    assert count == 1
+
+
+def test_official_fallback_does_not_overwrite_currency_or_value_conflict():
+    conn = store.connect(":memory:")
+    store.insert_financial_snapshot(
+        conn,
+        {**_metadata("provider", "2026-09-17T00:00:00+00:00"),
+         "symbol": "NVDA", "currency": "USD"},
+        [_fact("revenue", 90.0)],
+    )
+    baseline = {
+        "period_end": "2026-06-30", "currency": "USD",
+        "source_url": "https://example.test/official",
+        "metrics": {"revenue": 100.0},
+    }
+    result = apply_official_quarterly_fallbacks(conn, {"NVDA": baseline})
+    assert result["NVDA"][0] == "validation_failed"
+    latest = store.load_latest_quarterly_financials(conn, "NVDA")
+    assert latest.loc["2026-06-30", "revenue"] == 90.0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM financial_statement_snapshots"
+    ).fetchone()[0] == 1
+
+
+def test_latest_statement_metadata_returns_one_source_per_symbol():
+    conn = store.connect(":memory:")
+    store.insert_financial_snapshot(
+        conn, _metadata("old", "2026-09-15T00:00:00+00:00"), [_fact("revenue", 90)])
+    store.insert_financial_snapshot(
+        conn, _metadata("new", "2026-09-16T00:00:00+00:00"), [_fact("revenue", 100)])
+    metadata = store.load_latest_statement_metadata(conn, ["NVDA"])
+    assert metadata[["symbol", "snapshot_id"]].to_dict("records") == [
+        {"symbol": "NVDA", "snapshot_id": "new"}]
+
+
+def test_quarterly_update_uses_official_fallback_after_provider_failure(monkeypatch):
+    conn = store.connect(":memory:")
+
+    def fake_provider(_conn, symbols, stale_days=7, report=None):
+        report.update({symbol: ("failed", "供应商无数据") for symbol in symbols})
+        return 0, list(symbols)
+
+    monkeypatch.setattr(run_daily.fetcher, "update_quarterly_financials", fake_provider)
+    monkeypatch.setattr(run_daily, "load_official_baselines", lambda _path: {"DLR": {}})
+    monkeypatch.setattr(
+        run_daily, "apply_official_quarterly_fallbacks",
+        lambda _conn, _baselines, symbols: {
+            "DLR": ("verified_fallback", "导入官方 2026-06-30 的 2 个已核验字段")},
+    )
+    report = {}
+    ok, failed = run_daily.update_quarterly_research(conn, ["DLR"], report=report)
+    assert ok == 1
+    assert failed == []
+    assert report["DLR"][0] == "verified_fallback"

@@ -90,6 +90,10 @@ class Config:
         return bool(self.raw.get("notify", {}).get("email", False))
 
     @property
+    def research_digest_enabled(self) -> bool:
+        return bool(self.raw.get("notify", {}).get("research_digest", False))
+
+    @property
     def cost_bps(self) -> float:
         return float(self.raw.get("backtest", {}).get("cost_bps", 0))
 

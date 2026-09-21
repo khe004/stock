@@ -26,7 +26,9 @@ def _seed_partial_db(path: Path) -> None:
         conn, "NVDA", "2026-09-15", "2026-09-15T23:00:00+00:00",
         {"market_cap": 3e12, "forward_pe": 30.0, "ev_to_ebitda": 25.0,
          "price_to_sales": 20.0, "revenue_growth": 0.5},
-        {"currency": "USD", "financialCurrency": "USD", "shortName": "NVIDIA"},
+        {"currency": "USD", "financialCurrency": "USD", "shortName": "NVIDIA",
+         "totalRevenue": 100e9, "ebitda": 40e9, "totalDebt": 12e9,
+         "totalCash": 20e9, "sharesOutstanding": 25e9},
     )
     conn.close()
 
@@ -90,6 +92,7 @@ def test_ai_infra_partial_data_components_and_lane_switch(tmp_path, monkeypatch)
     assert not at.exception, f"初始渲染报异常: {at.exception}"
     assert any(item.value == "研究数据状态" for item in at.subheader)
     assert any(item.value == "赛道概览" for item in at.subheader)
+    assert any("用户假设情景分析" in item.value for item in at.markdown)
     sort = next(item for item in at.selectbox if item.key == "ai_infra_sort")
     sort.set_value("近1月").run()
     assert next(item for item in at.selectbox if item.key == "ai_infra_sort").value == "近1月"

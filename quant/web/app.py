@@ -25,6 +25,7 @@ from quant.analysis.robustness import (defensive_symbols, equal_weight_equity,
                                       leverage_to_target_vol, levered_returns,
                                       robustness_report, split_windows)
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
+from quant.analysis.research_digest import build_research_digest
 from quant.analysis.screening import compute_strength, market_regime
 from quant.backtest.engine import (
     dca_equity,
@@ -2401,18 +2402,23 @@ def render_ai_infra():
     这是一个观察/研究页面，不产生任何交易信号、不接入任何策略、不进模型组合。
     """
     from quant.analysis.ai_infra import (
+        compute_reit_metrics,
         compute_growth_metrics,
         compute_lane_market_share,
         compute_lane_summary,
         compact_amount,
         display_name,
         get_currency_for_symbol,
+        is_reit_company,
         peer_valuation_percentile,
         to_usd_market_cap,
         valuation_warning,
     )
     from quant.strategies.selectors import momentum_return
     from quant.analysis.research_status import research_status
+    from quant.analysis.business_evidence import (
+        audit_business_evidence, extract_evidence_candidates,
+    )
     from quant.analysis.quarterly import compute_quarterly_metrics, describe_quarterly_change
 
     st.title("🤖 AI 基建")
@@ -2486,6 +2492,16 @@ def render_ai_infra():
     q_overdue = int((quarterly_status["季度三表抓取时间状态"] == "过期").sum())
     status_cols[3].metric("季度三表样本", f"{q_covered}/{len(cfg.quarterly_research_symbols)}",
                           help=f"过期 {q_overdue} 只；当前仅验证样本")
+    latest_q_sources = store.load_latest_statement_metadata(
+        conn, cfg.quarterly_research_symbols, "quarterly")
+    if not latest_q_sources.empty:
+        official_mask = latest_q_sources["source"].str.contains(
+            "公司官方材料", na=False)
+        st.caption(
+            f"季度样本最新来源：供应商快照 {int((~official_mask).sum())} 家，"
+            f"官方核验兜底 {int(official_mask.sum())} 家。官方兜底只包含已逐项核验字段，"
+            "其余字段保持缺失；详情页可查看来源链接与发布日期。"
+        )
     problem = status_df[
         (status_df[["行情日期状态", "基本面日期状态", "财报抓取时间状态"]] != "正常").any(axis=1)
         | (status_df.get("基本面更新结果", pd.Series(index=status_df.index)) == "failed")
@@ -2510,17 +2526,28 @@ def render_ai_infra():
                 "risks": "风险", "next_check": "下次核查", "created_at": "更新时间",
             })
             st.dataframe(watch, width="stretch", hide_index=True)
-            summary_lines = []
-            for note in latest_notes.itertuples():
-                changes = store.research_changes_since_view(conn, note.symbol)
-                if changes:
-                    summary_lines.append(
-                        f"- {note.symbol}（{note.status}）："
-                        + "、".join(item["类型"] for item in changes)
-                    )
             st.markdown("**研究摘要预览（不会发送）**")
-            st.code("\n".join(summary_lines) if summary_lines else "当前无上次查看后的变化。")
-            st.caption("邮件/Telegram 研究摘要尚未启用；先在站内预览，避免重复或误报。")
+            digest_preview, _ = build_research_digest(conn)
+            st.code(digest_preview or "当前无新增变化或未来 30 天事件。")
+            digest_state = "已启用" if cfg.research_digest_enabled else "未启用"
+            st.caption(f"邮件/Telegram 研究摘要：{digest_state}。独立开关为 "
+                       "`notify.research_digest`；相同内容按渠道去重，失败渠道单独重试。")
+
+    upcoming_events = store.load_research_events(
+        conn, start=pd.Timestamp.today().date().isoformat())
+    with st.expander(f"财报日历与研究事件（{len(upcoming_events)} 项）", expanded=False):
+        st.caption("预计与已确认日期分开标记；订正保留原事件，不覆盖历史。"
+                   "假设到期用于提醒重新核查研究判断，不代表业务恶化。")
+        if upcoming_events.empty:
+            st.caption("暂无未来事件；可在公司详情的研究记录区添加。")
+        else:
+            shown_events = upcoming_events.rename(columns={
+                "symbol": "代码", "event_type": "类型", "event_date": "日期",
+                "date_status": "日期状态", "title": "事项", "source_url": "来源",
+                "correction_of_id": "订正原事件", "created_at": "记录时间",
+            })
+            st.dataframe(shown_events, width="stretch", hide_index=True,
+                         column_config={"来源": st.column_config.LinkColumn("来源")})
 
     # ── 加载数据 ──
     with st.spinner("加载行情、基本面和财报数据…"):
@@ -2842,6 +2869,12 @@ def render_ai_infra():
                           .sort_values("fiscal_date") if not fin_df.empty else pd.DataFrame())
             has_fund = detail_symbol in latest_fund.index
             fund_row = latest_fund.loc[detail_symbol] if has_fund else None
+            detail_raw = {}
+            if fund_row is not None and isinstance(fund_row.get("raw_json"), str):
+                try:
+                    detail_raw = json.loads(fund_row.get("raw_json") or "{}")
+                except (ValueError, TypeError):
+                    detail_raw = {}
 
             st.caption(
                 "赛道：" + "、".join(name for name, symbols in lanes.items()
@@ -2973,6 +3006,37 @@ def render_ai_infra():
                     "供应商未提供可靠发布日期与报告期起始日，当前查询结果不支持历史已知信息回放。"
                 )
 
+            if is_reit_company(detail_raw):
+                st.markdown("**REIT 专用指标**")
+                reit = compute_reit_metrics(fund_row, quarterly_df)
+                reit_cols = st.columns(6)
+                reit_cols[0].metric("股息率", _metric_text(reit.dividend_yield, ".2%"))
+                reit_cols[1].metric("年化每股股息", _metric_text(
+                    reit.annual_dividend_per_share, ".2f"))
+                reit_cols[2].metric("EV/EBITDA", _metric_text(reit.ev_to_ebitda, ".1f"))
+                reit_cols[3].metric("净债务/EBITDA", _metric_text(
+                    reit.net_debt_to_ebitda, ".1f"))
+                reit_cols[4].metric("P/FFO", _metric_text(reit.price_to_ffo, ".1f"))
+                reit_cols[5].metric("P/AFFO", _metric_text(reit.price_to_affo, ".1f"))
+                if reit.ttm_ffo is not None or reit.ttm_affo is not None:
+                    st.caption(
+                        f"直接披露 TTM FFO：{_money(reit.ttm_ffo)}；"
+                        f"FFO 派息率：{_metric_text(reit.ffo_payout_ratio, '.1%')}；"
+                        f"直接披露 TTM AFFO：{_money(reit.ttm_affo)}；"
+                        f"AFFO 派息率：{_metric_text(reit.affo_payout_ratio, '.1%')}；"
+                        f"最新报告期：{reit.latest_period or '无'}。"
+                    )
+                else:
+                    st.info(
+                        "当前季度事实没有连续四季、公司直接披露的 FFO/AFFO，因此 P/FFO、"
+                        "P/AFFO 与对应派息率保持为空。普通自由现金流不能替代 REIT 的 FFO/AFFO。"
+                    )
+                st.caption(
+                    "REIT 的房地产折旧会压低 GAAP 净利润，因此本区不使用 P/E 判断估值。"
+                    "EV/EBITDA 与净债务/EBITDA来自基本面同一快照；FFO/AFFO 只接受直接披露值，"
+                    "不从净利润、折旧或普通自由现金流估算。"
+                )
+
             st.markdown("**年度经营趋势**")
             if detail_fin.empty:
                 st.info("暂无年度财报记录；运行研究数据更新后再查看。")
@@ -3077,11 +3141,121 @@ def render_ai_infra():
                         evidence, width="stretch", hide_index=True,
                         column_config={"source_url": st.column_config.LinkColumn("来源")},
                     )
+                with st.expander("从原文辅助提取候选", expanded=False):
+                    st.caption(
+                        "粘贴公司原文后仅生成候选，不访问网页、不自动入库。保存前需人工补齐定义和"
+                        "范围；保存后状态固定为“待核验”，不能据此自动计算 AI 收入占比。"
+                    )
+                    extraction_url = st.text_input(
+                        "原文来源链接", key=f"extract_url_{detail_symbol}")
+                    extraction_published = st.text_input(
+                        "原文发布日期", placeholder="YYYY-MM-DD；未知可留空",
+                        key=f"extract_published_{detail_symbol}")
+                    extraction_text = st.text_area(
+                        "粘贴原文", height=180, key=f"extract_text_{detail_symbol}")
+                    candidate_key = f"evidence_candidates_{detail_symbol}"
+                    if st.button("提取候选", key=f"extract_candidates_{detail_symbol}"):
+                        candidates = extract_evidence_candidates(extraction_text)
+                        if candidates.empty:
+                            st.session_state.pop(candidate_key, None)
+                            st.warning("没有识别到带指标关键词和单位/数量级的数值，请保留更多上下文。")
+                        else:
+                            candidates["period_basis"] = candidates["period"].map(
+                                lambda value: "单季" if "Q" in str(value).upper()
+                                or "季度" in str(value) else (
+                                    "年度" if "FY" in str(value).upper()
+                                    or "全年" in str(value) else "其他"))
+                            candidates["scope"] = ""
+                            candidates["definition_text"] = ""
+                            st.session_state[candidate_key] = candidates
+                    if candidate_key in st.session_state:
+                        edited_candidates = st.data_editor(
+                            st.session_state[candidate_key], width="stretch", hide_index=True,
+                            key=f"candidate_editor_{detail_symbol}",
+                            column_config={
+                                "采用": st.column_config.CheckboxColumn("采用"),
+                                "value_numeric": st.column_config.NumberColumn("数值", format="%.6f"),
+                            },
+                        )
+                        if st.button("保存选中候选为待核验", key=f"save_candidates_{detail_symbol}"):
+                            selected = edited_candidates[edited_candidates["采用"] == True]  # noqa: E712
+                            required_fields = [
+                                "metric_name", "period", "period_basis", "scope",
+                                "definition_text", "unit",
+                            ]
+                            missing = [
+                                str(index + 1) for index, row in selected.reset_index(drop=True).iterrows()
+                                if any(pd.isna(row.get(field))
+                                       or not str(row.get(field)).strip()
+                                       for field in required_fields)
+                            ]
+                            if not extraction_url.strip():
+                                st.error("保存候选前必须填写来源链接。")
+                            elif selected.empty:
+                                st.error("请至少勾选一条候选。")
+                            elif missing:
+                                st.error("第 " + "、".join(missing)
+                                         + " 条候选缺少指标、报告期、期间口径、范围、定义或单位。")
+                            else:
+                                for _, row in selected.iterrows():
+                                    store.save_business_evidence(
+                                        conn, detail_symbol, str(row["metric_name"]),
+                                        extraction_url, str(row["value_text"]), str(row["period"]),
+                                        str(row["unit"]), extraction_published, str(row["excerpt"]),
+                                        "辅助提取", "待核验", str(row["definition_text"]),
+                                        str(row["scope"]), str(row["period_basis"]),
+                                        str(row.get("currency") or ""), float(row["value_numeric"]),
+                                        str(row["value_scale"]),
+                                    )
+                                st.session_state.pop(candidate_key, None)
+                                st.success(f"已保存 {len(selected)} 条待核验候选；核验后请新增已核验版本。")
+                                st.rerun()
+                all_evidence = store.load_business_evidence(conn)
+                if not all_evidence.empty:
+                    metric_options = sorted(all_evidence["metric_name"].dropna().unique())
+                    audit_metric = st.selectbox(
+                        "跨公司口径检查", metric_options,
+                        index=(metric_options.index(evidence.iloc[0]["metric_name"])
+                               if not evidence.empty
+                               and evidence.iloc[0]["metric_name"] in metric_options else 0),
+                        key=f"evidence_audit_{detail_symbol}",
+                    )
+                    audit = audit_business_evidence(all_evidence, audit_metric)
+                    audit_rows = audit["rows"]
+                    audit_columns = [column for column in (
+                        "symbol", "metric_name", "value_numeric", "value_scale", "unit",
+                        "currency", "period", "period_basis", "scope", "definition_text",
+                        "verification_status", "source_url",
+                    ) if column in audit_rows.columns]
+                    st.dataframe(
+                        audit_rows[audit_columns], width="stretch", hide_index=True,
+                        column_config={"source_url": st.column_config.LinkColumn("来源")},
+                    )
+                    if audit["compatible"]:
+                        st.success(
+                            f"口径一致：{audit['company_count']} 家可比较；换算至原值后的合计为 "
+                            f"{compact_amount(audit['aggregate'])}。"
+                        )
+                    else:
+                        st.warning(
+                            "禁止直接合计：" + "；".join(audit["issues"]) + "。"
+                            "补齐或统一定义后才会显示合计。"
+                        )
                 with st.form(f"business_evidence_{detail_symbol}"):
                     ev_metric = st.text_input("指标名称", placeholder="例如：数据中心收入、订单积压")
                     ev_value = st.text_input("披露值", placeholder="例如：$89.0B")
                     ev_period = st.text_input("报告期", placeholder="例如：2026Q2")
-                    ev_unit = st.text_input("单位/币种", placeholder="例如：USD")
+                    ev_period_basis = st.selectbox(
+                        "期间口径", ["单季", "年度", "TTM", "期末时点", "其他"])
+                    ev_scope = st.text_input(
+                        "统计范围", placeholder="例如：公司合并口径、数据中心分部")
+                    ev_definition = st.text_area(
+                        "指标定义", placeholder="写清包含/排除项；定义不同的同名指标不会合计")
+                    ev_unit = st.text_input("计量单位", placeholder="例如：金额、MW、台、平方英尺")
+                    ev_currency = st.text_input("币种（非金额指标可留空）", placeholder="例如：USD")
+                    structured = st.checkbox("同时录入结构化数值，用于一致口径后的比较/合计")
+                    ev_numeric = st.number_input("结构化数值", value=0.0, format="%.6f")
+                    ev_scale = st.selectbox("数量级", ["原值", "千", "百万", "十亿", "万亿"])
                     ev_published = st.text_input("发布日期", placeholder="YYYY-MM-DD；未知可留空")
                     ev_source = st.text_input("来源链接（必填）")
                     ev_excerpt = st.text_area("原文摘录或定位")
@@ -3093,8 +3267,39 @@ def render_ai_infra():
                             store.save_business_evidence(
                                 conn, detail_symbol, ev_metric, ev_source, ev_value,
                                 ev_period, ev_unit, ev_published, ev_excerpt,
-                                "人工", ev_verified)
+                                "人工", ev_verified, ev_definition, ev_scope,
+                                ev_period_basis, ev_currency,
+                                ev_numeric if structured else None, ev_scale)
                             st.success("业务证据已保存。")
+                            st.rerun()
+
+                st.markdown("**财报日历与研究事件**")
+                events = store.load_research_events(conn, detail_symbol)
+                if events.empty:
+                    st.caption("暂无事件。预计/确认财报日、假设到期和订正均可在此记录。")
+                else:
+                    st.dataframe(events, width="stretch", hide_index=True,
+                                 column_config={"source_url": st.column_config.LinkColumn("来源")})
+                with st.form(f"research_event_{detail_symbol}"):
+                    event_type = st.selectbox("事件类型", ["财报", "假设到期", "订正"])
+                    event_date = st.date_input("事件日期")
+                    event_status = st.selectbox("日期状态", ["预计", "已确认"])
+                    event_title = st.text_input("事件标题", placeholder="例如：2026Q3 财报发布")
+                    event_source = st.text_input("事件来源链接（必填）")
+                    correction_options = ([None] + list(events["id"])
+                                          if not events.empty else [None])
+                    correction_id = st.selectbox(
+                        "订正原事件（仅订正需要）", correction_options,
+                        format_func=lambda value: "不适用" if value is None else f"事件 #{value}")
+                    if st.form_submit_button("添加研究事件"):
+                        try:
+                            store.save_research_event(
+                                conn, detail_symbol, event_type, event_date.isoformat(),
+                                event_status, event_title, event_source, correction_id)
+                        except ValueError as exc:
+                            st.error(str(exc))
+                        else:
+                            st.success("研究事件已保存。")
                             st.rerun()
 
         # CAGR 断崖说明：只有本赛道真有标的被标记时才出现，避免刷屏
@@ -3117,7 +3322,10 @@ def render_ai_infra():
             )
 
         # ── 同业比较与估值快照历史（阶段 3 首版）──
-        from quant.analysis.ai_infra import historical_percentile, valuation_history
+        from quant.analysis.ai_infra import (
+            historical_percentile, point_in_time_ttm_valuation, valuation_history,
+            valuation_scenarios,
+        )
 
         st.subheader("同业比较与估值历史")
         st.caption(
@@ -3187,6 +3395,7 @@ def render_ai_infra():
                 )
                 st.plotly_chart(fig, width="stretch")
 
+        st.markdown("#### 供应商估值快照历史")
         history = valuation_history(fdf, detail_symbol)
         if history.empty:
             st.info(f"{detail_symbol} 尚无有效估值历史快照。")
@@ -3216,6 +3425,152 @@ def render_ai_infra():
                         f"（n={stats['sample_count']}，{stats['start']} 至 {stats['end']}）"
                     )
             st.caption("；".join(summaries) + "。样本较短时只表示已存观察点，不称为五年分位。")
+
+        st.markdown("#### 历史 TTM 倍数（按当时已存数据重建）")
+        st.caption(
+            "每个点只使用该基本面快照时已存的最新季度财报版本；必须有连续四季、字段完整且"
+            "财报币种与交易币种一致。缺少历史企业价值、币种换算或重叠快照时保持为空，"
+            "不会用今天的数据回填过去。"
+        )
+        fact_versions = store.load_financial_fact_versions(conn, detail_symbol)
+        reconstructed = point_in_time_ttm_valuation(fdf, fact_versions, detail_symbol)
+        if reconstructed.empty:
+            st.info(
+                f"{detail_symbol} 暂无可严格重建的历史 TTM 倍数；需等待基本面快照与已存的"
+                "连续四季财报在时间上重叠。"
+            )
+        else:
+            ttm_fig = go.Figure()
+            ttm_labels = {
+                "ttm_pe": "TTM P/E", "ttm_ev_ebitda": "TTM EV/EBITDA",
+                "ttm_ps": "TTM P/S",
+            }
+            for column, label in ttm_labels.items():
+                if reconstructed[column].notna().any():
+                    ttm_fig.add_trace(go.Scatter(
+                        x=reconstructed.index, y=reconstructed[column],
+                        mode="lines+markers", name=label,
+                    ))
+            ttm_fig.update_layout(
+                height=330, margin=dict(l=10, r=10, t=30, b=10),
+                title=f"{detail_symbol} 历史 TTM 估值（时点重建）", yaxis_title="倍数",
+            )
+            st.plotly_chart(ttm_fig, width="stretch")
+            reconstruction_display = reconstructed.reset_index().rename(columns={
+                "date": "观察日期", "report_snapshot_at": "采用财报快照",
+                "latest_period": "最新报告期", "ttm_pe": "TTM P/E",
+                "ttm_ev_ebitda": "TTM EV/EBITDA", "ttm_ps": "TTM P/S",
+            })
+            st.dataframe(
+                reconstruction_display[
+                    ["观察日期", "采用财报快照", "最新报告期", "TTM P/E",
+                     "TTM EV/EBITDA", "TTM P/S"]
+                ], width="stretch", hide_index=True,
+                column_config={
+                    c: st.column_config.NumberColumn(c, format="%.1f")
+                    for c in ("TTM P/E", "TTM EV/EBITDA", "TTM P/S")
+                },
+            )
+
+        st.markdown("#### 用户假设情景分析")
+        st.caption(
+            "这是可编辑的 EV/EBITDA 算术，不是预测模型。三种情景并列展示；收入、利润率、"
+            "估值倍数、净债务、股本和币种均为显式假设，页面不指定哪一种最可能。"
+        )
+        scenario_currency = detail_raw.get("currency")
+        financial_currency = detail_raw.get("financialCurrency") or scenario_currency
+        same_currency = (scenario_currency and financial_currency
+                         and str(scenario_currency).upper() == str(financial_currency).upper())
+        if fund_row is None or not same_currency:
+            st.warning(
+                "当前证券交易币种与财报币种不一致或币种缺失，无法安全自动填入情景分析。"
+                "在建立可追溯的汇率与 ADR/普通股股本换算前，不输出隐含价格。"
+            )
+        else:
+            raw_revenue = pd.to_numeric(detail_raw.get("totalRevenue"), errors="coerce")
+            raw_ebitda = pd.to_numeric(detail_raw.get("ebitda"), errors="coerce")
+            raw_debt = pd.to_numeric(detail_raw.get("totalDebt"), errors="coerce")
+            raw_cash = pd.to_numeric(detail_raw.get("totalCash"), errors="coerce")
+            raw_shares = pd.to_numeric(detail_raw.get("sharesOutstanding"), errors="coerce")
+            defaults_ready = all(pd.notna(value) for value in (
+                raw_revenue, raw_debt, raw_cash, raw_shares,
+            )) and raw_revenue > 0 and raw_shares > 0
+            if not defaults_ready:
+                st.info(
+                    "当前快照缺少 TTM 营收、债务、现金或流通股本，无法建立完整的资本结构情景。"
+                )
+            else:
+                with st.expander("编辑三种情景", expanded=False):
+                    capital_cols = st.columns(3)
+                    scenario_revenue = capital_cols[0].number_input(
+                        f"TTM 营收（{scenario_currency}）", min_value=0.01,
+                        value=float(raw_revenue), format="%.2f", key=f"scenario_revenue_{detail_symbol}")
+                    scenario_net_debt = capital_cols[1].number_input(
+                        f"净债务（{scenario_currency}）", value=float(raw_debt - raw_cash),
+                        format="%.2f", key=f"scenario_net_debt_{detail_symbol}")
+                    scenario_shares = capital_cols[2].number_input(
+                        "股本/证券份数", min_value=0.01, value=float(raw_shares),
+                        format="%.2f", key=f"scenario_shares_{detail_symbol}")
+
+                    base_growth = pd.to_numeric(fund_row.get("revenue_growth"), errors="coerce")
+                    base_growth = float(base_growth) if pd.notna(base_growth) else 0.10
+                    base_margin = (float(raw_ebitda / raw_revenue)
+                                   if pd.notna(raw_ebitda) and raw_ebitda > 0 else 0.20)
+                    base_multiple = pd.to_numeric(fund_row.get("ev_to_ebitda"), errors="coerce")
+                    base_multiple = float(base_multiple) if pd.notna(base_multiple) \
+                        and base_multiple > 0 else 15.0
+                    scenario_defs = []
+                    for label, growth_delta, margin_delta, multiple_delta in (
+                        ("悲观", -0.10, -0.05, -3.0),
+                        ("基准", 0.0, 0.0, 0.0),
+                        ("乐观", 0.10, 0.05, 3.0),
+                    ):
+                        inputs = st.columns(3)
+                        growth = inputs[0].number_input(
+                            f"{label}：收入增长", min_value=-1.0, max_value=3.0,
+                            value=max(-1.0, min(3.0, base_growth + growth_delta)),
+                            step=0.01, format="%.2f", key=f"scenario_growth_{label}_{detail_symbol}")
+                        margin = inputs[1].number_input(
+                            f"{label}：EBITDA 利润率", min_value=0.001, max_value=1.0,
+                            value=max(0.001, min(1.0, base_margin + margin_delta)),
+                            step=0.01, format="%.3f", key=f"scenario_margin_{label}_{detail_symbol}")
+                        multiple = inputs[2].number_input(
+                            f"{label}：EV/EBITDA", min_value=0.1, max_value=100.0,
+                            value=max(0.1, min(100.0, base_multiple + multiple_delta)),
+                            step=0.5, format="%.1f", key=f"scenario_multiple_{label}_{detail_symbol}")
+                        scenario_defs.append({
+                            "scenario": label, "revenue_growth": growth,
+                            "ebitda_margin": margin, "ev_to_ebitda": multiple,
+                        })
+                scenarios = valuation_scenarios(
+                    scenario_revenue, scenario_net_debt, scenario_shares,
+                    scenario_defs, current_price=last_close,
+                )
+                scenario_display = scenarios.rename(columns={
+                    "scenario": "情景", "revenue_growth": "收入增长",
+                    "ebitda_margin": "EBITDA利润率", "ev_to_ebitda": "EV/EBITDA",
+                    "projected_revenue": "情景收入", "projected_ebitda": "情景EBITDA",
+                    "enterprise_value": "企业价值", "equity_value": "股权价值",
+                    "implied_price": "隐含每股价值", "upside": "相对现价",
+                })
+                st.dataframe(
+                    scenario_display, width="stretch", hide_index=True,
+                    column_config={
+                        "收入增长": st.column_config.NumberColumn(format="%+.1%"),
+                        "EBITDA利润率": st.column_config.NumberColumn(format="%.1%"),
+                        "EV/EBITDA": st.column_config.NumberColumn(format="%.1f"),
+                        **{name: st.column_config.NumberColumn(format="compact") for name in (
+                            "情景收入", "情景EBITDA", "企业价值", "股权价值")},
+                        "隐含每股价值": st.column_config.NumberColumn(format="%.2f"),
+                        "相对现价": st.column_config.NumberColumn(format="%+.1%"),
+                    },
+                )
+                st.caption(
+                    f"统一币种：{scenario_currency}；股本口径：供应商 sharesOutstanding，可编辑；"
+                    f"对比现价：{_metric_text(last_close, '.2f')}（{price_date or '日期未知'}）。"
+                    "公式：情景收入 × EBITDA 利润率 × EV/EBITDA − 净债务 = 股权价值；"
+                    "再除以股本得到隐含每股价值。未计稀释、税务、并购、汇率及执行风险。"
+                )
 
 
 PAGES = {

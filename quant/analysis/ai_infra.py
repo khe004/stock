@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import math
+import json
 from dataclasses import dataclass
 
 import pandas as pd
@@ -38,6 +39,168 @@ class GrowthMetrics:
     gross_margin: float | None       # 毛利率（小数，如 0.71 = 71%）
     net_margin: float | None         # 净利率（小数）
     cagr_break: float | None = None  # CAGR 窗口内最大单年营收跌幅（小数，负值），无断崖为 None
+
+
+@dataclass
+class ReitMetrics:
+    """REIT 专用指标；FFO/AFFO 只使用直接披露的季度事实。"""
+    dividend_yield: float | None = None
+    annual_dividend_per_share: float | None = None
+    ev_to_ebitda: float | None = None
+    net_debt_to_ebitda: float | None = None
+    ttm_ffo: float | None = None
+    price_to_ffo: float | None = None
+    ffo_payout_ratio: float | None = None
+    ttm_affo: float | None = None
+    price_to_affo: float | None = None
+    affo_payout_ratio: float | None = None
+    latest_period: str | None = None
+
+
+def is_reit_company(raw: dict | None) -> bool:
+    """用供应商行业标签识别 REIT，不把所有房地产公司都自动视为 REIT。"""
+    if not raw:
+        return False
+    labels = " ".join(str(raw.get(key) or "") for key in (
+        "industry", "industryKey", "industryDisp",
+    )).lower()
+    return "reit" in labels or "real estate investment trust" in labels
+
+
+def compute_reit_metrics(fundamental: pd.Series | dict | None,
+                         quarterly: pd.DataFrame) -> ReitMetrics:
+    """计算 REIT 指标，不用 GAAP 净利润或普通 FCF 伪造 FFO/AFFO。"""
+    result = ReitMetrics()
+    if fundamental is None:
+        return result
+    raw_value = fundamental.get("raw_json")
+    if isinstance(raw_value, str):
+        try:
+            raw = json.loads(raw_value) if raw_value else {}
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {}
+    elif isinstance(raw_value, dict):
+        raw = raw_value
+    else:
+        raw = {}
+
+    def positive(value) -> float | None:
+        number = pd.to_numeric(value, errors="coerce")
+        return float(number) if pd.notna(number) and float(number) > 0 else None
+
+    dividend_yield = positive(fundamental.get("dividend_yield"))
+    # yfinance 的 dividendYield 历史上既出现过 0.0259，也出现过 2.59。
+    result.dividend_yield = (dividend_yield / 100
+                             if dividend_yield is not None and dividend_yield > 1
+                             else dividend_yield)
+    result.annual_dividend_per_share = positive(
+        raw.get("dividendRate") or raw.get("trailingAnnualDividendRate"))
+    result.ev_to_ebitda = positive(fundamental.get("ev_to_ebitda"))
+    debt, cash, ebitda = (positive(raw.get("totalDebt")), positive(raw.get("totalCash")),
+                          positive(raw.get("ebitda")))
+    if debt is not None and ebitda is not None:
+        result.net_debt_to_ebitda = (debt - (cash or 0.0)) / ebitda
+
+    if quarterly.empty:
+        return result
+    work = quarterly.copy()
+    work.index = pd.to_datetime(work.index)
+    work = work.sort_index()
+    dates = list(work.index[-4:])
+    if len(dates) != 4 or not all(
+            70 <= (b - a).days <= 120 for a, b in zip(dates, dates[1:])):
+        return result
+    statement_currency = quarterly.attrs.get("currency")
+    market_currency = raw.get("currency") or quarterly.attrs.get("trading_currency")
+    if (not statement_currency or not market_currency
+            or str(statement_currency).upper() != str(market_currency).upper()):
+        return result
+    result.latest_period = dates[-1].strftime("%Y-%m-%d")
+
+    def direct_ttm(metric: str) -> float | None:
+        if metric not in work:
+            return None
+        values = pd.to_numeric(work.loc[dates, metric], errors="coerce")
+        total = float(values.sum()) if values.notna().all() else None
+        return total if total is not None and total > 0 else None
+
+    result.ttm_ffo = direct_ttm("funds_from_operations")
+    result.ttm_affo = direct_ttm("adjusted_funds_from_operations")
+    market_cap = positive(fundamental.get("market_cap"))
+    shares = positive(raw.get("sharesOutstanding"))
+    annual_distribution = (result.annual_dividend_per_share * shares
+                           if result.annual_dividend_per_share is not None
+                           and shares is not None else None)
+    if result.ttm_ffo is not None:
+        result.price_to_ffo = market_cap / result.ttm_ffo if market_cap else None
+        result.ffo_payout_ratio = (annual_distribution / result.ttm_ffo
+                                   if annual_distribution is not None else None)
+    if result.ttm_affo is not None:
+        result.price_to_affo = market_cap / result.ttm_affo if market_cap else None
+        result.affo_payout_ratio = (annual_distribution / result.ttm_affo
+                                    if annual_distribution is not None else None)
+    return result
+
+
+def valuation_scenarios(
+    revenue: float | None,
+    net_debt: float | None,
+    shares_outstanding: float | None,
+    assumptions: list[dict],
+    current_price: float | None = None,
+) -> pd.DataFrame:
+    """用显式的收入增长、EBITDA 利润率和 EV/EBITDA 生成多情景结果。
+
+    所有金额必须由调用方保证处于同一币种，股数必须与证券口径一致。本函数不猜汇率、
+    不回填股本，也不选择所谓“最可能”的单一目标价。
+    """
+    columns = [
+        "scenario", "revenue_growth", "ebitda_margin", "ev_to_ebitda",
+        "projected_revenue", "projected_ebitda", "enterprise_value",
+        "equity_value", "implied_price", "upside",
+    ]
+
+    def finite(value) -> float | None:
+        number = pd.to_numeric(value, errors="coerce")
+        return float(number) if pd.notna(number) and math.isfinite(float(number)) else None
+
+    revenue_value = finite(revenue)
+    debt_value = finite(net_debt)
+    shares_value = finite(shares_outstanding)
+    price_value = finite(current_price)
+    if (revenue_value is None or revenue_value <= 0 or debt_value is None
+            or shares_value is None or shares_value <= 0):
+        return pd.DataFrame(columns=columns)
+    rows = []
+    for item in assumptions:
+        growth = finite(item.get("revenue_growth"))
+        margin = finite(item.get("ebitda_margin"))
+        multiple = finite(item.get("ev_to_ebitda"))
+        if growth is None or margin is None or multiple is None or margin <= 0 or multiple <= 0:
+            continue
+        projected_revenue = revenue_value * (1 + growth)
+        if projected_revenue <= 0:
+            continue
+        projected_ebitda = projected_revenue * margin
+        enterprise_value = projected_ebitda * multiple
+        equity_value = enterprise_value - debt_value
+        implied_price = equity_value / shares_value if equity_value > 0 else None
+        upside = (implied_price / price_value - 1
+                  if implied_price is not None and price_value is not None and price_value > 0
+                  else None)
+        rows.append({
+            "scenario": str(item.get("scenario") or "未命名"),
+            "revenue_growth": growth,
+            "ebitda_margin": margin,
+            "ev_to_ebitda": multiple,
+            "projected_revenue": projected_revenue,
+            "projected_ebitda": projected_ebitda,
+            "enterprise_value": enterprise_value,
+            "equity_value": equity_value,
+            "implied_price": implied_price,
+            "upside": upside,
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def compute_growth_metrics(fin_df: pd.DataFrame, symbol: str) -> GrowthMetrics:
@@ -338,6 +501,89 @@ def valuation_history(fundamentals: pd.DataFrame, symbol: str) -> pd.DataFrame:
     # 负分母对应的倍数没有估值含义；保留极端正值供页面打标，不缩尾。
     out = out.where(out > 0)
     return out.dropna(how="all")
+
+
+def point_in_time_ttm_valuation(
+    fundamentals: pd.DataFrame, facts: pd.DataFrame, symbol: str,
+) -> pd.DataFrame:
+    """按每个基本面观察时点当时可见的季度快照重建 TTM 估值。
+
+    每个观察点只选 ``captured_at`` 不晚于基本面快照的最新一版财报；四个季度
+    必须连续且字段完整。财报币种与交易币种不一致时不换算，也不拿今天的数据回填。
+    """
+    columns = ["captured_at", "report_snapshot_at", "latest_period", "ttm_pe",
+               "ttm_ev_ebitda", "ttm_ps"]
+    if fundamentals.empty or facts.empty or "symbol" not in fundamentals.columns:
+        return pd.DataFrame(columns=columns)
+    fund = fundamentals[fundamentals["symbol"] == symbol].copy()
+    if fund.empty or "captured_at" not in fund or "captured_at" not in facts:
+        return pd.DataFrame(columns=columns)
+    fund["_captured"] = pd.to_datetime(fund["captured_at"], utc=True, errors="coerce")
+    work = facts.copy()
+    work["_captured"] = pd.to_datetime(work["captured_at"], utc=True, errors="coerce")
+    fund = fund.dropna(subset=["_captured"]).sort_values("_captured")
+    work = work.dropna(subset=["_captured"])
+    rows = []
+    for _, observation in fund.iterrows():
+        visible = work[work["_captured"] <= observation["_captured"]]
+        if visible.empty:
+            continue
+        latest_capture = visible["_captured"].max()
+        candidates = visible[visible["_captured"] == latest_capture]
+        snapshot_id = candidates["snapshot_id"].iloc[-1]
+        snapshot = candidates[candidates["snapshot_id"] == snapshot_id]
+        financial_currency = snapshot["currency"].iloc[0]
+        trading_currency = snapshot["trading_currency"].iloc[0]
+        try:
+            raw = json.loads(observation.get("raw_json") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            raw = {}
+        market_currency = raw.get("currency") or trading_currency
+        if (not financial_currency or not market_currency
+                or str(financial_currency).upper() != str(market_currency).upper()):
+            continue
+        quarterly = snapshot.pivot_table(
+            index="period_end", columns="metric", values="value",
+            aggfunc="first", dropna=False,
+        ).sort_index()
+        quarterly.index = pd.to_datetime(quarterly.index)
+        if quarterly.empty:
+            continue
+        dates = list(quarterly.index[-4:])
+        if len(dates) != 4 or not all(
+                70 <= (b - a).days <= 120 for a, b in zip(dates, dates[1:])):
+            continue
+
+        def total(metric: str) -> float | None:
+            if metric not in quarterly:
+                return None
+            values = pd.to_numeric(quarterly.loc[dates, metric], errors="coerce")
+            return float(values.sum()) if values.notna().all() else None
+
+        market_cap = pd.to_numeric(observation.get("market_cap"), errors="coerce")
+        enterprise_value = pd.to_numeric(raw.get("enterpriseValue"), errors="coerce")
+        revenue, net_income, ebitda = total("revenue"), total("net_income"), total("ebitda")
+        ttm_pe = (float(market_cap) / net_income
+                  if pd.notna(market_cap) and net_income is not None and net_income > 0 else None)
+        ttm_ps = (float(market_cap) / revenue
+                  if pd.notna(market_cap) and revenue is not None and revenue > 0 else None)
+        ttm_ev_ebitda = (float(enterprise_value) / ebitda
+                         if pd.notna(enterprise_value) and ebitda is not None and ebitda > 0
+                         else None)
+        if ttm_pe is None and ttm_ps is None and ttm_ev_ebitda is None:
+            continue
+        rows.append({
+            "date": pd.to_datetime(observation.get("date")),
+            "captured_at": observation["captured_at"],
+            "report_snapshot_at": snapshot["captured_at"].iloc[0],
+            "latest_period": dates[-1].strftime("%Y-%m-%d"),
+            "ttm_pe": ttm_pe,
+            "ttm_ev_ebitda": ttm_ev_ebitda,
+            "ttm_ps": ttm_ps,
+        })
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows).set_index("date").sort_index()
 
 
 def historical_percentile(series: pd.Series) -> dict:

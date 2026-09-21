@@ -66,23 +66,27 @@ python run_daily.py --no-notify         # 只入库不推送
 python run_daily.py --full-refresh      # 全量重拉行情（复权价随分红回溯变化，建议每季度一次）
 python run_daily.py --backfill          # 把各策略全量历史信号补入库（标记已通知不推送），初始化信号历史
 
-streamlit run quant/web/app.py          # 打开复盘面板（含 AI 基建公司详情）
+streamlit run quant/web/app.py          # 打开复盘面板（含 AI 基建完整研究流程）
 python -m pytest tests/                 # 跑单元测试
 # 只刷新基本面与 AI 基建财报，不拉行情、不跑策略、不发通知
 python run_daily.py --research-only
 # 指定公司/数据种类；--force 忽略 7/30 天刷新间隔
 python run_daily.py --research-only --symbols NVDA AMKR --research-data fundamentals --force
-# 刷新阶段 2 的季度利润表、资产负债表和现金流样本
+# 刷新阶段 2 的季度利润表、资产负债表和现金流样本；随后自动核验并按需导入官方最小兜底
 python run_daily.py --research-only --research-data quarterly --force
 # 对照已人工核验的 8 家公司官方材料；非零退出表示缺期/币种/数值不一致
 python scripts/verify_quarterly_samples.py
-# 供应商整期缺失时，只导入基准文件中明确核验过的字段（不会从旧季度拼值）
+# 可单独重跑官方兜底；命令幂等，只导入基准中明确核验的字段（不会从旧季度拼值）
 python scripts/import_verified_quarterly_fallbacks.py
 ```
 
 ## 配置
 
 `config.yaml` 里改 watchlist（按组：大盘 / 行业 / 主题 / 资产类 / 现金 / 哨兵 / 防守 / 跨资产 / 进攻成长 / AI 基建 等 15 组）、策略参数与作用组、通知开关、以及 `model_portfolio.strategies`（相关性页推荐配方的默认成分）。AI 基建观察池单独维护在 `universe_ai_infra.yaml`，可随时增删。
+
+AI 基建页目前包含季度三表与来源版本、同业和历史估值、REIT 专用口径、可编辑多情景估值、
+版本化研究判断、事件日历以及业务证据记录。业务证据支持从粘贴原文中辅助提取候选，但候选始终
+以“待核验”保存；定义、范围、报告期、单位和币种一致且已核验后，才允许跨公司合计。
 
 ## 目录
 

@@ -289,6 +289,10 @@ QUARTERLY_METRICS = {
         "gross_profit": ("Gross Profit",),
         "operating_income": ("Operating Income",),
         "net_income": ("Net Income", "Net Income Common Stockholders"),
+        "ebitda": ("EBITDA", "Normalized EBITDA"),
+        # REIT 专用口径只接受供应商直接报告的 FFO/AFFO；不从普通 FCF 推导。
+        "funds_from_operations": ("Funds From Operations",),
+        "adjusted_funds_from_operations": ("Adjusted Funds From Operations",),
     },
     "balance": {
         "cash": ("Cash Cash Equivalents And Short Term Investments",

@@ -14,12 +14,47 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from quant import strategies
+from quant.analysis.quarterly_validation import (
+    apply_official_quarterly_fallbacks,
+    load_official_baselines,
+)
+from quant.analysis.research_digest import build_research_digest
 from quant.config import ROOT, load_config
 from quant.data import fetcher, store
 from quant.notify import email, telegram
 from quant.strategies.base import BUY
 
 log = logging.getLogger("run_daily")
+
+
+def update_quarterly_research(conn, symbols: list[str], stale_days: int = 7,
+                              report: dict | None = None) -> tuple[int, list[str]]:
+    """更新季度三表，并自动以已核验官方基准补供应商缺期/缺字段。"""
+    provider_report: dict[str, tuple[str, str]] = {}
+    _, failed = fetcher.update_quarterly_financials(
+        conn, symbols, stale_days=stale_days, report=provider_report)
+    baselines = load_official_baselines(ROOT / "quarterly_sample_baselines.yaml")
+    checks = apply_official_quarterly_fallbacks(conn, baselines, symbols=symbols)
+    failed_set = set(failed)
+    for symbol, (check_status, check_detail) in checks.items():
+        provider_status, provider_detail = provider_report.get(
+            symbol, ("skipped", "供应商未执行更新"))
+        if check_status == "verified_fallback":
+            provider_report[symbol] = ("verified_fallback", check_detail)
+            failed_set.discard(symbol)
+        elif check_status == "validation_failed":
+            provider_report[symbol] = (
+                "failed", f"{provider_detail}；官方核验异常：{check_detail}")
+            failed_set.add(symbol)
+        elif check_status == "verified":
+            provider_report[symbol] = (
+                provider_status, f"{provider_detail}；{check_detail}")
+        # 未配置基准时保留供应商结果，便于未来逐步扩展样本。
+    if report is not None:
+        report.update(provider_report)
+    completed = sum(status in ("updated", "verified_fallback")
+                    for status, _ in provider_report.values())
+    return completed, sorted(failed_set)
 
 
 def setup_logging() -> None:
@@ -167,15 +202,16 @@ def main(argv: list[str] | None = None) -> int:
                 fetcher.update_financials(conn, symbols,
                                           stale_days=-1 if args.force else 30, report=report)
             else:
-                fetcher.update_quarterly_financials(
+                update_quarterly_research(
                     conn, symbols, stale_days=-1 if args.force else 7, report=report)
             for symbol, (status, detail) in report.items():
                 store.record_research_update(conn, symbol, data_type, status, detail)
                 log.info("研究更新 %s %s: %s (%s)", data_type, symbol, status, detail)
             counts = {status: sum(v[0] == status for v in report.values())
-                      for status in ("updated", "skipped", "failed")}
-            log.info("%s: 更新 %d / 跳过 %d / 失败 %d", data_type,
-                     counts["updated"], counts["skipped"], counts["failed"])
+                      for status in ("updated", "verified_fallback", "skipped", "failed")}
+            log.info("%s: 更新 %d / 官方兜底 %d / 跳过 %d / 失败 %d", data_type,
+                     counts["updated"], counts["verified_fallback"],
+                     counts["skipped"], counts["failed"])
             any_failed |= counts["failed"] > 0
         return 1 if any_failed else 0
 
@@ -213,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.no_fetch and not args.no_fundamentals and cfg.quarterly_research_symbols:
         try:
-            quarterly_ok, quarterly_fail = fetcher.update_quarterly_financials(
+            quarterly_ok, quarterly_fail = update_quarterly_research(
                 conn, cfg.quarterly_research_symbols)
             log.info("季度三表更新完成：成功 %d，失败 %d", quarterly_ok, len(quarterly_fail))
         except Exception:  # noqa: BLE001
@@ -299,6 +335,20 @@ def main(argv: list[str] | None = None) -> int:
         if failed:
             shown = ", ".join(failed[:20]) + (f" 等 {len(failed)} 个" if len(failed) > 20 else "")
             dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {shown}，信号可能不完整")
+
+        if cfg.research_digest_enabled:
+            digest_body, digest_hash = build_research_digest(conn)
+            if digest_body:
+                for channel in channels:
+                    if store.research_digest_delivered(conn, digest_hash, channel):
+                        log.info("%s 研究摘要内容已送达，跳过重复发送", channel)
+                        continue
+                    if send_channel(channel, "🔎 AI 基建研究摘要", digest_body):
+                        store.mark_research_digest_delivered(conn, digest_hash, channel)
+                    else:
+                        log.warning("%s 研究摘要发送失败，保留该渠道待重试", channel)
+            else:
+                log.info("研究摘要无新增变化或临近事件，跳过发送")
 
     return 0
 

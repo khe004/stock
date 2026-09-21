@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -554,6 +556,158 @@ def test_valuation_history_and_percentile_preserve_snapshot_boundaries():
     stats = historical_percentile(history["forward_pe"])
     assert stats == {"percentile": 1.0, "sample_count": 2,
                      "start": "2026-07-01", "end": "2026-09-01"}
+
+
+def _ttm_facts(captured="2026-08-01T00:00:00+00:00", currency="USD",
+               trading_currency="USD", periods=None, include_ebitda=True):
+    periods = periods or ["2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"]
+    rows = []
+    for period in periods:
+        metrics = {"revenue": 100.0, "net_income": 10.0}
+        if include_ebitda:
+            metrics["ebitda"] = 20.0
+        for metric, value in metrics.items():
+            rows.append({
+                "snapshot_id": "v1", "period_end": period, "metric": metric,
+                "value": value, "currency": currency,
+                "trading_currency": trading_currency, "captured_at": captured,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_point_in_time_ttm_valuation_uses_only_visible_snapshot():
+    from quant.analysis.ai_infra import point_in_time_ttm_valuation
+
+    fundamentals = pd.DataFrame([{
+        "symbol": "A", "date": "2026-08-02",
+        "captured_at": "2026-08-02T00:00:00+00:00", "market_cap": 800.0,
+        "raw_json": '{"currency":"USD","enterpriseValue":1000}',
+    }])
+    result = point_in_time_ttm_valuation(fundamentals, _ttm_facts(), "A")
+    assert result.iloc[0]["ttm_pe"] == pytest.approx(20.0)
+    assert result.iloc[0]["ttm_ps"] == pytest.approx(2.0)
+    assert result.iloc[0]["ttm_ev_ebitda"] == pytest.approx(12.5)
+    assert result.iloc[0]["latest_period"] == "2026-06-30"
+
+    before = fundamentals.assign(
+        date="2026-07-01", captured_at="2026-07-01T00:00:00+00:00")
+    assert point_in_time_ttm_valuation(before, _ttm_facts(), "A").empty
+
+
+def test_point_in_time_ttm_valuation_rejects_gaps_and_currency_mismatch():
+    from quant.analysis.ai_infra import point_in_time_ttm_valuation
+
+    fundamentals = pd.DataFrame([{
+        "symbol": "A", "date": "2026-08-02",
+        "captured_at": "2026-08-02T00:00:00+00:00", "market_cap": 800.0,
+        "raw_json": '{"currency":"USD","enterpriseValue":1000}',
+    }])
+    gaps = ["2025-06-30", "2025-12-31", "2026-03-31", "2026-06-30"]
+    assert point_in_time_ttm_valuation(
+        fundamentals, _ttm_facts(periods=gaps), "A").empty
+    assert point_in_time_ttm_valuation(
+        fundamentals, _ttm_facts(currency="TWD"), "A").empty
+
+
+def test_point_in_time_ttm_valuation_keeps_partial_metrics_without_enterprise_value():
+    from quant.analysis.ai_infra import point_in_time_ttm_valuation
+
+    fundamentals = pd.DataFrame([{
+        "symbol": "A", "date": "2026-08-02",
+        "captured_at": "2026-08-02T00:00:00+00:00", "market_cap": 800.0,
+        "raw_json": '{"currency":"USD"}',
+    }])
+    result = point_in_time_ttm_valuation(fundamentals, _ttm_facts(), "A")
+    assert result.iloc[0]["ttm_pe"] == pytest.approx(20.0)
+    assert pd.isna(result.iloc[0]["ttm_ev_ebitda"])
+
+
+def test_reit_metrics_use_direct_ffo_and_normalize_dividend_yield():
+    from quant.analysis.ai_infra import compute_reit_metrics, is_reit_company
+
+    fundamental = pd.Series({
+        "dividend_yield": 2.5, "ev_to_ebitda": 20.0, "market_cap": 8_000.0,
+        "raw_json": json.dumps({
+            "industry": "REIT - Specialty", "currency": "USD",
+            "dividendRate": 4.0, "sharesOutstanding": 100.0,
+            "totalDebt": 3_000.0, "totalCash": 500.0, "ebitda": 1_000.0,
+        }),
+    })
+    quarterly = pd.DataFrame({
+        "funds_from_operations": [100.0] * 4,
+        "adjusted_funds_from_operations": [80.0] * 4,
+        "free_cash_flow": [999.0] * 4,
+    }, index=["2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"])
+    quarterly.attrs.update(currency="USD", trading_currency="USD")
+    result = compute_reit_metrics(fundamental, quarterly)
+    assert is_reit_company(json.loads(fundamental["raw_json"]))
+    assert result.dividend_yield == pytest.approx(0.025)
+    assert result.net_debt_to_ebitda == pytest.approx(2.5)
+    assert result.price_to_ffo == pytest.approx(20.0)
+    assert result.ffo_payout_ratio == pytest.approx(1.0)
+    assert result.price_to_affo == pytest.approx(25.0)
+    assert result.affo_payout_ratio == pytest.approx(1.25)
+
+
+def test_reit_metrics_do_not_substitute_free_cash_flow_for_ffo():
+    from quant.analysis.ai_infra import compute_reit_metrics, is_reit_company
+
+    fundamental = pd.Series({
+        "dividend_yield": 0.03, "market_cap": 8_000.0,
+        "raw_json": '{"industry":"REIT - Data Centers","currency":"USD"}',
+    })
+    quarterly = pd.DataFrame(
+        {"free_cash_flow": [100.0] * 4},
+        index=["2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30"],
+    )
+    quarterly.attrs.update(currency="USD", trading_currency="USD")
+    result = compute_reit_metrics(fundamental, quarterly)
+    assert is_reit_company({"sector": "Real Estate"}) is False
+    assert result.ttm_ffo is None
+    assert result.price_to_ffo is None
+
+
+def test_valuation_scenarios_expose_capital_structure_and_multiple_math():
+    from quant.analysis.ai_infra import valuation_scenarios
+
+    result = valuation_scenarios(
+        revenue=1_000.0, net_debt=200.0, shares_outstanding=100.0,
+        assumptions=[
+            {"scenario": "悲观", "revenue_growth": 0.0,
+             "ebitda_margin": 0.20, "ev_to_ebitda": 8.0},
+            {"scenario": "乐观", "revenue_growth": 0.20,
+             "ebitda_margin": 0.25, "ev_to_ebitda": 10.0},
+        ],
+        current_price=20.0,
+    )
+    bear = result.set_index("scenario").loc["悲观"]
+    bull = result.set_index("scenario").loc["乐观"]
+    assert bear["projected_ebitda"] == pytest.approx(200.0)
+    assert bear["enterprise_value"] == pytest.approx(1_600.0)
+    assert bear["equity_value"] == pytest.approx(1_400.0)
+    assert bear["implied_price"] == pytest.approx(14.0)
+    assert bear["upside"] == pytest.approx(-0.30)
+    assert bull["implied_price"] == pytest.approx(28.0)
+
+
+def test_valuation_scenarios_require_revenue_net_debt_and_share_basis():
+    from quant.analysis.ai_infra import valuation_scenarios
+
+    assumptions = [{"scenario": "基准", "revenue_growth": 0.1,
+                    "ebitda_margin": 0.2, "ev_to_ebitda": 10.0}]
+    assert valuation_scenarios(None, 0, 100, assumptions).empty
+    assert valuation_scenarios(1_000, None, 100, assumptions).empty
+    assert valuation_scenarios(1_000, 0, 0, assumptions).empty
+
+
+def test_valuation_scenarios_keep_negative_equity_price_empty():
+    from quant.analysis.ai_infra import valuation_scenarios
+
+    assumptions = [{"scenario": "压力", "revenue_growth": -0.9,
+                    "ebitda_margin": 0.1, "ev_to_ebitda": 1.0}]
+    result = valuation_scenarios(1_000, 500, 100, assumptions)
+    assert result.iloc[0]["equity_value"] < 0
+    assert pd.isna(result.iloc[0]["implied_price"])
 
 
 def test_peer_valuation_percentile_rewards_lower_multiples_and_skips_missing():

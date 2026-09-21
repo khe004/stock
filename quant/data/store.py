@@ -167,6 +167,12 @@ CREATE TABLE IF NOT EXISTS business_evidence_versions (
     excerpt TEXT,
     entry_method TEXT NOT NULL,
     verification_status TEXT NOT NULL,
+    definition_text TEXT,
+    scope TEXT,
+    period_basis TEXT,
+    currency TEXT,
+    value_numeric REAL,
+    value_scale TEXT,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_business_evidence_symbol
@@ -176,6 +182,21 @@ CREATE TABLE IF NOT EXISTS research_view_state (
     symbol TEXT PRIMARY KEY,
     last_viewed_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS research_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    event_date TEXT NOT NULL,
+    date_status TEXT NOT NULL,
+    title TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    correction_of_id INTEGER,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (correction_of_id) REFERENCES research_events(id)
+);
+CREATE INDEX IF NOT EXISTS idx_research_events_symbol_date
+    ON research_events(symbol, event_date, created_at);
 """
 
 SCHEMA_NOTIFICATION_DELIVERIES = """
@@ -185,6 +206,12 @@ CREATE TABLE IF NOT EXISTS notification_deliveries (
     delivered_at TEXT NOT NULL,
     PRIMARY KEY (signal_id, channel),
     FOREIGN KEY (signal_id) REFERENCES signals(id)
+);
+CREATE TABLE IF NOT EXISTS research_digest_deliveries (
+    content_hash TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    delivered_at TEXT NOT NULL,
+    PRIMARY KEY (content_hash, channel)
 );
 """
 
@@ -209,6 +236,10 @@ FINANCIAL_SNAPSHOT_ADDED_COLS = {
 ANNUAL_FINANCIAL_ADDED_COLS = {
     "currency": "TEXT", "trading_currency": "TEXT",
     "source": "TEXT", "source_url": "TEXT",
+}
+BUSINESS_EVIDENCE_ADDED_COLS = {
+    "definition_text": "TEXT", "scope": "TEXT", "period_basis": "TEXT",
+    "currency": "TEXT", "value_numeric": "REAL", "value_scale": "TEXT",
 }
 
 
@@ -254,6 +285,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(f"ALTER TABLE financials ADD COLUMN {col} "
                      f"{ANNUAL_FINANCIAL_ADDED_COLS[col]}")
         log.warning("financials 表缺列 %s，已补加", col)
+    evidence_missing = (set(BUSINESS_EVIDENCE_ADDED_COLS)
+                        - _table_cols(conn, "business_evidence_versions"))
+    for col in sorted(evidence_missing):
+        conn.execute(f"ALTER TABLE business_evidence_versions ADD COLUMN "
+                     f"{col} {BUSINESS_EVIDENCE_ADDED_COLS[col]}")
+        log.warning("business_evidence_versions 表缺列 %s，已补加", col)
     conn.commit()
 
 
@@ -306,7 +343,11 @@ def load_latest_research_notes(conn: sqlite3.Connection) -> pd.DataFrame:
 def save_business_evidence(conn: sqlite3.Connection, symbol: str, metric_name: str,
                            source_url: str, value_text: str = "", period: str = "",
                            unit: str = "", published_at: str = "", excerpt: str = "",
-                           entry_method: str = "人工", verification_status: str = "待核验") -> int:
+                           entry_method: str = "人工", verification_status: str = "待核验",
+                           definition_text: str = "", scope: str = "",
+                           period_basis: str = "", currency: str = "",
+                           value_numeric: float | None = None,
+                           value_scale: str = "原值") -> int:
     """新增一条业务证据版本；source_url 必填以保证可追溯。"""
     if not source_url.strip():
         raise ValueError("业务证据必须提供来源链接")
@@ -314,19 +355,71 @@ def save_business_evidence(conn: sqlite3.Connection, symbol: str, metric_name: s
     cursor = conn.execute(
         """INSERT INTO business_evidence_versions
            (symbol, metric_name, value_text, period, unit, published_at, source_url,
-            excerpt, entry_method, verification_status, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            excerpt, entry_method, verification_status, definition_text, scope,
+            period_basis, currency, value_numeric, value_scale, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (symbol, metric_name, value_text, period, unit, published_at, source_url,
-         excerpt, entry_method, verification_status, created_at),
+         excerpt, entry_method, verification_status, definition_text, scope,
+         period_basis, currency, value_numeric, value_scale, created_at),
     )
     conn.commit()
     return int(cursor.lastrowid)
 
 
-def load_business_evidence(conn: sqlite3.Connection, symbol: str) -> pd.DataFrame:
-    return pd.read_sql_query(
-        "SELECT * FROM business_evidence_versions WHERE symbol = ? ORDER BY id DESC",
-        conn, params=[symbol])
+def load_business_evidence(conn: sqlite3.Connection, symbol: str | None = None) -> pd.DataFrame:
+    query = "SELECT * FROM business_evidence_versions"
+    params: list[str] = []
+    if symbol:
+        query += " WHERE symbol = ?"
+        params.append(symbol)
+    query += " ORDER BY id DESC"
+    return pd.read_sql_query(query, conn, params=params)
+
+
+def save_research_event(conn: sqlite3.Connection, symbol: str, event_type: str,
+                        event_date: str, date_status: str, title: str,
+                        source_url: str, correction_of_id: int | None = None) -> int:
+    """新增财报/假设到期/订正事件；不覆盖旧事件。"""
+    from datetime import date
+    if event_type not in {"财报", "假设到期", "订正"}:
+        raise ValueError("未知研究事件类型")
+    if date_status not in {"预计", "已确认"}:
+        raise ValueError("日期状态必须是预计或已确认")
+    date.fromisoformat(event_date)
+    if not title.strip() or not source_url.strip():
+        raise ValueError("事件标题和来源链接必须填写")
+    if event_type == "订正":
+        if correction_of_id is None:
+            raise ValueError("订正事件必须引用原事件")
+        original = conn.execute(
+            "SELECT symbol FROM research_events WHERE id = ?", (correction_of_id,)
+        ).fetchone()
+        if not original or original["symbol"] != symbol:
+            raise ValueError("被订正事件不存在或不属于该公司")
+    created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    cursor = conn.execute(
+        """INSERT INTO research_events
+           (symbol, event_type, event_date, date_status, title, source_url,
+            correction_of_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (symbol, event_type, event_date, date_status, title.strip(), source_url.strip(),
+         correction_of_id, created_at),
+    )
+    conn.commit()
+    return int(cursor.lastrowid)
+
+
+def load_research_events(conn: sqlite3.Connection, symbol: str | None = None,
+                         start: str | None = None) -> pd.DataFrame:
+    query = "SELECT * FROM research_events WHERE 1=1"
+    params: list = []
+    if symbol:
+        query += " AND symbol = ?"
+        params.append(symbol)
+    if start:
+        query += " AND event_date >= ?"
+        params.append(start)
+    query += " ORDER BY event_date, id"
+    return pd.read_sql_query(query, conn, params=params)
 
 
 def mark_research_viewed(conn: sqlite3.Connection, symbol: str,
@@ -354,6 +447,7 @@ def research_changes_since_view(conn: sqlite3.Connection, symbol: str) -> list[d
         ("季度三表", "SELECT MAX(captured_at) d FROM financial_statement_snapshots WHERE symbol = ?"),
         ("业务证据", "SELECT MAX(created_at) d FROM business_evidence_versions WHERE symbol = ?"),
         ("研究判断", "SELECT MAX(created_at) d FROM research_note_versions WHERE symbol = ?"),
+        ("研究事件", "SELECT MAX(created_at) d FROM research_events WHERE symbol = ?"),
     ]
     for label, query in sources:
         latest = conn.execute(query, (symbol,)).fetchone()["d"]
@@ -424,6 +518,27 @@ def latest_statement_capture(conn: sqlite3.Connection, symbol: str,
     return row["d"]
 
 
+def load_latest_statement_metadata(conn: sqlite3.Connection, symbols: list[str],
+                                   frequency: str = "quarterly") -> pd.DataFrame:
+    """读取每个标的最新一版财务快照的来源信息，不展开事实表。"""
+    if not symbols:
+        return pd.DataFrame(columns=[
+            "symbol", "snapshot_id", "source", "source_url", "published_at", "captured_at"])
+    placeholders = ",".join("?" for _ in symbols)
+    return pd.read_sql_query(
+        f"""SELECT s.symbol, s.snapshot_id, s.currency, s.trading_currency,
+                   s.source, s.source_url, s.published_at, s.captured_at
+            FROM financial_statement_snapshots AS s
+            WHERE s.frequency = ? AND s.symbol IN ({placeholders})
+              AND s.snapshot_id = (
+                  SELECT s2.snapshot_id FROM financial_statement_snapshots AS s2
+                  WHERE s2.symbol = s.symbol AND s2.frequency = s.frequency
+                  ORDER BY s2.captured_at DESC, s2.snapshot_id DESC LIMIT 1
+              )
+            ORDER BY s.symbol""",
+        conn, params=[frequency, *symbols])
+
+
 def load_latest_financial_facts(conn: sqlite3.Connection, symbol: str,
                                 frequency: str = "quarterly") -> pd.DataFrame:
     """读取单个最新快照的全部事实；不跨快照补空值。"""
@@ -439,6 +554,19 @@ def load_latest_financial_facts(conn: sqlite3.Connection, symbol: str,
                ORDER BY captured_at DESC, snapshot_id DESC LIMIT 1
            )
            ORDER BY f.period_end, f.statement, f.metric""",
+        conn, params=[symbol, frequency])
+
+
+def load_financial_fact_versions(conn: sqlite3.Connection, symbol: str,
+                                 frequency: str = "quarterly") -> pd.DataFrame:
+    """读取全部财务快照版本，供严格按 captured_at 的历史重建使用。"""
+    return pd.read_sql_query(
+        """SELECT f.*, s.symbol, s.frequency, s.currency, s.trading_currency,
+                  s.source, s.source_url, s.published_at, s.captured_at
+           FROM financial_facts AS f
+           JOIN financial_statement_snapshots AS s USING (snapshot_id)
+           WHERE s.symbol = ? AND s.frequency = ?
+           ORDER BY s.captured_at, s.snapshot_id, f.period_end, f.statement, f.metric""",
         conn, params=[symbol, frequency])
 
 
@@ -555,6 +683,25 @@ def delivered_signal_ids(conn: sqlite3.Connection, ids: list[int], channel: str)
         [channel, *ids],
     ).fetchall()
     return {int(row["signal_id"]) for row in rows}
+
+
+def research_digest_delivered(conn: sqlite3.Connection, content_hash: str,
+                              channel: str) -> bool:
+    return conn.execute(
+        "SELECT 1 FROM research_digest_deliveries WHERE content_hash = ? AND channel = ?",
+        (content_hash, channel),
+    ).fetchone() is not None
+
+
+def mark_research_digest_delivered(conn: sqlite3.Connection, content_hash: str,
+                                   channel: str) -> None:
+    delivered_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.execute(
+        """INSERT OR IGNORE INTO research_digest_deliveries
+           (content_hash, channel, delivered_at) VALUES (?, ?, ?)""",
+        (content_hash, channel, delivered_at),
+    )
+    conn.commit()
 
 
 def load_signals(

@@ -5,6 +5,7 @@ NVDA:
   period_end: "2026-07-31"
   published_at: "2026-08-26"
   currency: USD
+  trading_currency: USD
   source_url: https://investor.nvidia.com/files/doc_financials/2027/NVDA-2027-Q2-10Q-Final-including-exhibits.pdf
   metrics:
     revenue: 96221000000
@@ -19,6 +20,7 @@ MU:
   provider_period_end: "2026-05-31"
   published_at: "2026-06-24"
   currency: USD
+  trading_currency: USD
   source_url: https://investors.micron.com/static-files/23023765-dfef-4e7e-845b-cd744fc20d93
   metrics:
     revenue: 41456000000
@@ -31,6 +33,7 @@ VRT:
   period_end: "2026-06-30"
   published_at: "2026-07-29"
   currency: USD
+  trading_currency: USD
   source_url: https://investors.vertiv.com/events-presentations/events-presentations/default.aspx
   metrics:
     revenue: 3274300000
@@ -39,6 +42,7 @@ MSFT:
   period_end: "2026-06-30"
   published_at: "2026-07-29"
   currency: USD
+  trading_currency: USD
   source_url: https://www.microsoft.com/en-us/investor/earnings/fy-2026-q4/press-release-webcast
   metrics:
     revenue: 90007000000
@@ -49,6 +53,7 @@ DLR:
   period_end: "2026-06-30"
   published_at: "2026-07-23"
   currency: USD
+  trading_currency: USD
   source_url: https://investor.digitalrealty.com/news-releases/news-release-details/digital-realty-reports-second-quarter-2026-results
   metrics:
     revenue: 1924040000
@@ -58,6 +63,7 @@ TSM:
   period_end: "2026-06-30"
   published_at: "2026-07-16"
   currency: TWD
+  trading_currency: USD
   source_url: https://investor.tsmc.com/chinese/encrypt/files/encrypt_file/reports/2026-07/a80d7933be643644081584087731f73b22ea5a2c/2Q26%20EarningsRelease.pdf
   metrics:
     revenue: 1270380250000
@@ -69,6 +75,7 @@ TSM:
   period_end: "2026-06-30"
   published_at: "2026-07-30"
   currency: KRW
+  trading_currency: KRW
   source_url: https://news.samsung.com/global/samsung-electronics-announces-second-quarter-2026-results
   metrics:
     revenue: 171499500000000
@@ -78,6 +85,7 @@ ARM:
   period_end: "2026-06-30"
   published_at: "2026-07-29"
   currency: USD
+  trading_currency: USD
   source_url: https://investors.arm.com/node/8356/html
   metrics:
     revenue: 1289000000
