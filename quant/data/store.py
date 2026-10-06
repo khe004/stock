@@ -1,4 +1,4 @@
-"""SQLite 存储：行情表 prices、信号表 signals、基本面表 fundamentals。"""
+"""SQLite 存储：行情表 prices、信号表 signals、基本面表 fundamentals、期权快照 option_*。"""
 
 import json
 import logging
@@ -215,6 +215,36 @@ CREATE TABLE IF NOT EXISTS research_digest_deliveries (
 );
 """
 
+# 期权链每日快照（个股/指数 CSP 前向数据集）。yfinance 只给"当天"的链、没有历史，
+# 所以要回测个股卖 put 只能从今天起自己攒——这两张表就是那份 point-in-time 数据。
+# snapshot_date = 该标的库内最新行情日（报价对应的交易日），captured_at = 实际抓取时刻。
+SCHEMA_OPTIONS = """
+CREATE TABLE IF NOT EXISTS option_snapshots (
+    snapshot_date TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    spot          REAL,
+    next_earnings TEXT,
+    n_quotes      INTEGER,
+    captured_at   TEXT NOT NULL,
+    PRIMARY KEY (snapshot_date, symbol)
+);
+CREATE TABLE IF NOT EXISTS option_quotes (
+    snapshot_date TEXT NOT NULL,
+    symbol        TEXT NOT NULL,
+    expiration    TEXT NOT NULL,
+    option_type   TEXT NOT NULL,
+    strike        REAL NOT NULL,
+    bid           REAL,
+    ask           REAL,
+    last          REAL,
+    volume        INTEGER,
+    open_interest INTEGER,
+    iv            REAL,
+    last_trade    TEXT,
+    PRIMARY KEY (snapshot_date, symbol, expiration, option_type, strike)
+);
+"""
+
 
 # 迁移用：两张表的期望列。老版本库（早期在用户机器上重建过的 schema）可能缺列
 PRICES_COL_TYPES = {
@@ -306,6 +336,7 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.executescript(SCHEMA_FINANCIAL_FACTS)
     conn.executescript(SCHEMA_RESEARCH_RECORDS)
     conn.executescript(SCHEMA_NOTIFICATION_DELIVERIES)
+    conn.executescript(SCHEMA_OPTIONS)
     _migrate(conn)
     return conn
 
@@ -846,3 +877,64 @@ def latest_financial_date(conn: sqlite3.Connection, symbol: str) -> str | None:
         "SELECT MAX(captured_at) AS d FROM financials WHERE symbol = ?", (symbol,)
     ).fetchone()
     return row["d"]
+
+
+# ---------- 期权链快照（option_snapshots / option_quotes）----------
+
+def has_option_snapshot(conn: sqlite3.Connection, snapshot_date: str, symbol: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM option_snapshots WHERE snapshot_date = ? AND symbol = ?",
+        (snapshot_date, symbol)).fetchone()
+    return row is not None
+
+
+def save_option_snapshot(conn: sqlite3.Connection, snapshot_date: str, symbol: str,
+                         spot: float | None, next_earnings: str | None,
+                         quotes: pd.DataFrame, captured_at: str) -> int:
+    """写入一个标的一天的期权快照（幂等：同日同标的重复写入被忽略，先到为准）。
+
+    quotes 需含 expiration/option_type/strike/bid/ask/last/volume/open_interest/iv/last_trade。
+    返回新写入的报价行数。"""
+    if has_option_snapshot(conn, snapshot_date, symbol):
+        return 0
+
+    def _num(v, cast=float):
+        return cast(v) if v is not None and pd.notna(v) else None
+
+    rows = [
+        (snapshot_date, symbol, str(r["expiration"]), str(r["option_type"]), float(r["strike"]),
+         _num(r.get("bid")), _num(r.get("ask")), _num(r.get("last")),
+         _num(r.get("volume"), int), _num(r.get("open_interest"), int), _num(r.get("iv")),
+         None if pd.isna(r.get("last_trade")) else str(r.get("last_trade")))
+        for _, r in quotes.iterrows()
+    ]
+    conn.executemany(
+        "INSERT OR IGNORE INTO option_quotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    conn.execute(
+        "INSERT OR IGNORE INTO option_snapshots VALUES (?,?,?,?,?,?)",
+        (snapshot_date, symbol, spot, next_earnings, len(rows), captured_at))
+    conn.commit()
+    return len(rows)
+
+
+def load_option_snapshots(conn: sqlite3.Connection) -> pd.DataFrame:
+    """全部快照元数据（每标的每天一行）。"""
+    return pd.read_sql_query(
+        "SELECT * FROM option_snapshots ORDER BY snapshot_date, symbol", conn)
+
+
+def load_option_quotes(conn: sqlite3.Connection, snapshot_date: str | None = None,
+                       symbols: list[str] | None = None,
+                       option_type: str = "put") -> pd.DataFrame:
+    """读取报价，可按快照日/标的过滤，并带上当日 spot 与下次财报日。"""
+    query = ("SELECT q.*, s.spot, s.next_earnings FROM option_quotes q "
+             "JOIN option_snapshots s USING (snapshot_date, symbol) WHERE q.option_type = ?")
+    params: list = [option_type]
+    if snapshot_date:
+        query += " AND q.snapshot_date = ?"
+        params.append(snapshot_date)
+    if symbols:
+        query += f" AND q.symbol IN ({','.join('?' * len(symbols))})"
+        params.extend(symbols)
+    query += " ORDER BY q.snapshot_date, q.symbol, q.expiration, q.strike"
+    return pd.read_sql_query(query, conn, params=params)

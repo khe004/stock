@@ -3573,6 +3573,250 @@ def render_ai_infra():
                 )
 
 
+# ───────────────────────── 卖 put 研究 ─────────────────────────
+
+_PUT_STRIKE_CHOICES = {"平值 ATM（≈CBOE PUT 指数）": None, "30-delta 虚值": 0.30,
+                       "20-delta 虚值": 0.20}
+
+
+def _putwrite_inputs() -> dict | None:
+    """合成卖 put 的输入：SPY 原始收盘、VIX、^IRX 利率、BIL 日收益与 SPY 总回报日收益。"""
+    spy, vix = store.load_prices(conn, "SPY"), store.load_prices(conn, "^VIX")
+    if spy.empty or vix.empty:
+        return None
+    irx, bil = store.load_prices(conn, "^IRX"), store.load_prices(conn, "BIL")
+    rate = irx["close"] / 100 if not irx.empty else None
+    if not bil.empty:
+        cash_ret = price_series(bil).pct_change(fill_method=None)
+    elif rate is not None:
+        cash_ret = rate.reindex(spy.index).ffill().fillna(0.0) / 252
+    else:
+        cash_ret = pd.Series(0.0, index=spy.index)
+    return {"spot": spy["close"], "iv": vix["close"] / 100, "rate": rate,
+            "cash_ret": cash_ret, "spy_tr": price_series(spy)}
+
+
+def _render_synthetic_putwrite():
+    from quant.analysis.drawdowns import episode_returns, find_drawdown_episodes, severity
+    from quant.analysis.putwrite import (beta_matched_blend, cycle_summary, excess_sharpe,
+                                         regression_beta, simulate_putwrite)
+
+    st.caption(
+        "**问题**：每月卖一张 SPY 看跌期权、现金全额担保（零杠杆），能不能给平台加东西？"
+        "卖 put 赚的是**波动率风险溢价（VRP）**——期权隐含波动率长期高于事后实际波动率，"
+        "这是有几十年文献支撑的溢价（CBOE PUT 指数）。没有 SPY 历史期权数据，所以用 "
+        "**SPY 收盘 + VIX 当隐含波动率 + Black-Scholes** 合成：每月首个交易日卖出、"
+        "下个月首个交易日按内在价值结算，担保现金持 BIL。")
+    inp = _putwrite_inputs()
+    if inp is None:
+        st.warning("需要 SPY 与 ^VIX 行情")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        strike_label = st.radio("行权价", list(_PUT_STRIKE_CHOICES), index=1, key="pw_strike")
+    with c2:
+        iv_mult = st.slider("IV 乘数（VIX × ?）", 0.80, 1.20, 1.00, 0.02, key="pw_ivm",
+                            help="VIX 含虚值 put 的偏斜，通常比平值 IV 高 1~3 个点、"
+                                 "与 25~30Δ put 大致相当。平值口径建议拉到 0.90 左右看保守值。")
+    with c3:
+        haircut = st.slider("权利金折价（买卖价差）", 0.0, 0.15, 0.05, 0.01, key="pw_hc",
+                            format="%.2f", help="以买价成交损失的比例；SPY 期权价差很窄，5% 偏保守")
+    delta = _PUT_STRIKE_CHOICES[strike_label]
+
+    eq, cyc = simulate_putwrite(inp["spot"], inp["iv"], inp["rate"], inp["cash_ret"],
+                                target_delta=delta, premium_haircut=haircut, iv_mult=iv_mult,
+                                initial=INITIAL_CASH)
+    if eq.empty or cyc.empty:
+        st.warning("数据不足以完成一期卖 put")
+        return
+    idx = eq.index
+    spy_r = inp["spy_tr"].pct_change(fill_method=None).reindex(idx).fillna(0.0)
+    spy_r.iloc[0] = 0.0
+    cash_r = inp["cash_ret"].reindex(idx).fillna(0.0)
+    pw_r = eq.pct_change().fillna(0.0)
+    beta = regression_beta(pw_r, spy_r)
+    spy_eq = hold_equity(inp["spy_tr"].reindex(idx).ffill(), INITIAL_CASH, cfg.cost_bps)
+    blend = beta_matched_blend(spy_r, cash_r, beta, INITIAL_CASH, cfg.cost_bps)
+    cash_eq = INITIAL_CASH * (1 + cash_r).cumprod()
+    blend_name = f"β 匹配混合（{beta:.2f} SPY + BIL）"
+    curves = {"合成卖 put": eq, "SPY 长持": spy_eq, blend_name: blend, "BIL 现金": cash_eq}
+
+    st.caption(f"区间 {idx[0]:%Y-%m-%d} ~ {idx[-1]:%Y-%m-%d} · 共 {len(cyc)} 期 · "
+               f"对 SPY 的 β（月度）= **{beta:.2f}** · 日相关 {pw_r.corr(spy_r):.2f}")
+    risk_table(curves)
+    xs = {name: excess_sharpe(e, cash_r) for name, e in curves.items() if name != "BIL 现金"}
+    cols = st.columns(len(xs))
+    for col, (name, v) in zip(cols, xs.items()):
+        col.metric(f"扣现金夏普 · {name}", f"{v:.2f}")
+    st.caption("⚠️ 上表的夏普沿用平台口径（不扣无风险利率），对半仓现金的卖 put 与 β 混合**系统性偏高**"
+               "（纯 BIL 都能有两位数）。比较卖 put 与 β 混合请看这一行「扣现金夏普」。"
+               "**β 匹配混合才是公平基准**：卖 put ≈ 半仓股票 + 卖掉上方收益，跑赢它才说明真赚到了 VRP，"
+               "而不只是少持了股票。")
+
+    fig = go.Figure()
+    for name, e in curves.items():
+        fig.add_trace(go.Scatter(x=e.index, y=e, name=name, mode="lines"))
+    fig.update_layout(height=380, yaxis_type="log", yaxis_title="权益（对数）",
+                      margin=dict(l=10, r=10, t=30, b=10), legend=dict(orientation="h"))
+    st.plotly_chart(fig, width="stretch")
+
+    cs = cycle_summary(cyc)
+    st.markdown("**逐期统计**（每期收益以担保本金为分母，不含现金利息）")
+    m = st.columns(6)
+    m[0].metric("胜率", f"{cs['win_rate']:.0%}")
+    m[1].metric("被行权率", f"{cs['assigned_rate']:.0%}")
+    m[2].metric("平均权利金/期", f"{cs['avg_premium']:.2%}")
+    m[3].metric("平均赢 / 平均亏（%）", f"{cs['avg_win'] * 100:+.1f} / {cs['avg_loss'] * 100:+.1f}")
+    m[4].metric(f"最差一期（{cs['worst_date']:%Y-%m}）", f"{cs['worst']:+.1%}")
+    m[5].metric("最差一期 ≈ 几期权利金", f"{cs['worst_in_premiums']:.0f}")
+    st.caption("卖 put 的**胜率天然很高**——大概率小赚、小概率大亏是收益结构本身，不是本事。"
+               "看最后两格：一次亏损要吃掉多少期权利金。")
+
+    with st.expander("🧭 稳健性：分段 / 调仓日 / IV 口径", expanded=False):
+        rows = []
+        for label, a, b in split_windows(idx, 2):
+            seg = {n: e.loc[a:b] for n, e in curves.items() if n != "BIL 现金"}
+            seg = {n: e / e.iloc[0] * INITIAL_CASH for n, e in seg.items()}
+            for n, e in seg.items():
+                mm = equity_metrics(e, INITIAL_CASH)
+                rows.append({"区间": label, "对象": n, "年化": mm["cagr"],
+                             "最大回撤": mm["max_drawdown"],
+                             "扣现金夏普": excess_sharpe(e, cash_r)})
+        st.markdown("**前后两半**")
+        st.dataframe(pd.DataFrame(rows).style.format(
+            {"年化": "{:+.1%}", "最大回撤": "{:.1%}", "扣现金夏普": "{:.2f}"}),
+            width="stretch", hide_index=True)
+
+        rows = []
+        for off in (0, 5, 10, 15):
+            e, _ = simulate_putwrite(inp["spot"], inp["iv"], inp["rate"], inp["cash_ret"],
+                                     target_delta=delta, offset=off, premium_haircut=haircut,
+                                     iv_mult=iv_mult, initial=INITIAL_CASH)
+            mm = equity_metrics(e, INITIAL_CASH)
+            rows.append({"卖出日": f"每月第 {off + 1} 个交易日", "年化": mm["cagr"],
+                         "最大回撤": mm["max_drawdown"], "扣现金夏普": excess_sharpe(e, cash_r)})
+        for mult in (iv_mult - 0.1, iv_mult + 0.1):
+            e, _ = simulate_putwrite(inp["spot"], inp["iv"], inp["rate"], inp["cash_ret"],
+                                     target_delta=delta, premium_haircut=haircut,
+                                     iv_mult=mult, initial=INITIAL_CASH)
+            mm = equity_metrics(e, INITIAL_CASH)
+            rows.append({"卖出日": f"IV × {mult:.2f}（月首日）", "年化": mm["cagr"],
+                         "最大回撤": mm["max_drawdown"], "扣现金夏普": excess_sharpe(e, cash_r)})
+        st.markdown("**调仓日 timing luck 与 IV 口径敏感性**")
+        st.dataframe(pd.DataFrame(rows).style.format(
+            {"年化": "{:+.1%}", "最大回撤": "{:.1%}", "扣现金夏普": "{:.2f}"}),
+            width="stretch", hide_index=True)
+        st.caption("IV ±10% 就能让结论翻面时，说明合成回测的精度不足以分辨 VRP 的大小——"
+                   "这正是要靠真实期权快照（下一页签）攒数据的原因。")
+
+    with st.expander("📉 历次 SPY 下跌段里的表现", expanded=False):
+        px = pd.DataFrame({"SPY": inp["spy_tr"].reindex(idx).ffill(), "卖put": eq,
+                           "β混合": blend})
+        eps = [e for e in find_drawdown_episodes(px["SPY"], 0.08) if not e["ongoing"]]
+        rows = []
+        for e in eps:
+            r = episode_returns(px, e["peak_date"], e["end_date"], ["SPY", "卖put", "β混合"])
+            rows.append({"时段": f"{e['peak_date']:%Y-%m}→{e['trough_date']:%m-%d}",
+                         "严重度": severity(e["maxdd"]), **r})
+        if rows:
+            st.dataframe(pd.DataFrame(rows).style.format(
+                {"SPY": "{:+.1%}", "卖put": "{:+.1%}", "β混合": "{:+.1%}"}, na_rep="—"),
+                width="stretch", hide_index=True)
+        else:
+            st.info("区间内没有 ≥8% 的已结束下跌段")
+
+    st.info(
+        "**外部长历史复核（2026-10-06，1990–2018，标普指数 + VIX + 近似短债利率，非本库数据）**："
+        "30Δ 口径对 β 匹配混合超额年化 1990s +4.4% / 2000s +5.1% / **2010–2018 仅 +0.4%**，"
+        "扣现金夏普 2010–2018 **0.48 输 β 混合 0.75**；IV 乘 0.9 后全期超额只剩 +1.1%、"
+        "2010–2018 转为 -1.6%。平值口径按真实 PUT 指数校准（IV×≈0.9）后与 β 混合基本打平。"
+        "与 SPY 日相关 0.84~0.91 → 对以股票为主的模型组合**几乎不分散**。"
+        "结论：指数 VRP 在 2010 年前清晰、之后基本被吃掉，且结论对 IV 口径高度敏感——**仅研究，不进实盘**。")
+
+
+def _render_option_snapshots():
+    from quant.analysis.option_forward import (annotate_quotes, forward_summary, monthly_first,
+                                               pick_csp, settle_csp)
+
+    opt = cfg.options_research
+    st.caption(
+        "yfinance 不给历史期权链，所以个股卖 put 没法像 ETF 策略那样回测——只能**从今天起每天存一份**"
+        "（`run_daily` 自动采集，只存 put、周五到期、行权价/现价 0.75~1.02）。下面按**固定机械规则**"
+        "每个标的每天选一张（≈30 天、|Δ|≈0.25、按买价成交），到期后用收盘价结算。"
+        "**故意不做综合打分排名**：排名有没有加信息要等样本够了，拿「排名前 N vs 同日全部等权」验证。")
+    snaps = store.load_option_snapshots(conn)
+    if snaps.empty:
+        st.info(f"还没有期权快照。配置里 {len(opt['symbols'])} 个标的"
+                f"（{'已启用' if opt['enabled'] else '未启用'}），下次 `python run_daily.py` "
+                "联网运行时开始采集；`--no-options` 可跳过。")
+        return
+
+    days = snaps["snapshot_date"].nunique()
+    m = st.columns(4)
+    m[0].metric("已采集交易日", days)
+    m[1].metric("标的数", snaps["symbol"].nunique())
+    m[2].metric("报价行数", f"{int(snaps['n_quotes'].sum()):,}")
+    m[3].metric(f"最新快照（始于 {snaps['snapshot_date'].min()}）", snaps["snapshot_date"].max())
+
+    latest = snaps["snapshot_date"].max()
+    q = annotate_quotes(store.load_option_quotes(conn, latest))
+    picks = pick_csp(q)
+    st.markdown(f"**最新快照 {latest} · 每个标的按规则选出的那一张**（按标的字母序，不排名）")
+    if picks.empty:
+        st.info("最新快照里没有满足规则（20~45 天、买价 ≥ 0.05）的合约")
+    else:
+        show = picks.sort_values("symbol")[[
+            "symbol", "expiration", "dte", "spot", "strike", "buffer", "delta", "iv", "bid",
+            "ask", "prem_yield", "ann_yield", "open_interest", "earnings_in_window"]].rename(columns={
+                "symbol": "标的", "expiration": "到期", "dte": "天数", "spot": "现价",
+                "strike": "行权价", "buffer": "下跌缓冲", "delta": "Δ", "iv": "IV", "bid": "买价",
+                "ask": "卖价", "prem_yield": "权利金率", "ann_yield": "年化",
+                "open_interest": "未平仓", "earnings_in_window": "期内有财报"})
+        st.dataframe(show.style.format({
+            "现价": "{:.2f}", "行权价": "{:.2f}", "下跌缓冲": "{:.1%}", "Δ": "{:.2f}",
+            "IV": "{:.0%}", "买价": "{:.2f}", "卖价": "{:.2f}", "权利金率": "{:.2%}",
+            "年化": "{:.1%}"}, na_rep="—"), width="stretch", hide_index=True)
+        st.caption("年化 = 权利金率 × 365/天数，是**承担下跌风险的补偿**而非白赚；"
+                   "高 IV 个股的高年化大多对应更大的跳空风险。")
+
+    allq = annotate_quotes(store.load_option_quotes(conn))
+    allp = pick_csp(allq)
+    closes = {s: store.load_prices(conn, s, start=allp["snapshot_date"].min())["close"]
+              for s in allp["symbol"].unique()} if not allp.empty else {}
+    settled = settle_csp(allp, closes) if not allp.empty else allp
+    n_set = int((settled["status"] == "settled").sum()) if not settled.empty else 0
+    st.markdown(f"**前向结算**：已到期 {n_set} 笔 / 未到期 "
+                f"{len(settled) - n_set if not settled.empty else 0} 笔")
+    if n_set == 0:
+        st.info("还没有到期的合约（≈30 天后开始出结果）。")
+        return
+    monthly = st.toggle("只用每月首个快照日（不重叠样本，统计以此为准）", value=True, key="opt_monthly")
+    base = monthly_first(settled) if monthly else settled
+    summ = forward_summary(base, index_symbols={"SPY", "QQQ", "IWM"})
+    if summ.empty:
+        st.info("该口径下还没有已结算样本")
+        return
+    # 最差单笔不亏时"吃掉几笔权利金"无意义；预先转成文本，避免表格把 NaN 显示成 None
+    summ["最差≈几笔权利金"] = summ["最差≈几笔权利金"].map(
+        lambda v: "—" if pd.isna(v) else f"{v:.1f}")
+    st.dataframe(summ.style.format({
+        "胜率": "{:.0%}", "被行权率": "{:.0%}", "平均权利金": "{:.2%}", "平均单笔收益": "{:+.2%}",
+        "最差单笔": "{:+.1%}"}),
+        width="stretch", hide_index=True)
+    st.caption("⚠️ 前向样本在经历一次真正的崩盘之前，所有数字都**系统性偏乐观**；"
+               "至少攒满 1~2 年、覆盖一次 ≥10% 回撤后再下结论。")
+
+
+def render_put_research():
+    st.subheader("🧾 卖 put 研究（现金担保看跌期权 / VRP）")
+    t1, t2 = st.tabs(["📉 合成 SPY 卖 put（回测）", "🗂️ 个股期权快照（前向数据）"])
+    with t1:
+        _render_synthetic_putwrite()
+    with t2:
+        _render_option_snapshots()
+
+
 PAGES = {
     "📊 市场概览": render_market_overview,
     "📡 信号历史": render_signal_history,
@@ -3584,6 +3828,7 @@ PAGES = {
     "🎯 策略评分": render_strategy_scoring,
     "🔗 策略相关性": render_correlation,
     "🧪 回测": render_backtest,
+    "🧾 卖put研究": render_put_research,
     "📖 策略说明": render_strategy_docs,
 }
 

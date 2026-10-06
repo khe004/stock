@@ -414,3 +414,124 @@ def update_quarterly_financials(conn, symbols: list[str], stale_days: int = 7,
             report[symbol] = ("updated", f"写入 {periods} 期 / {count} 个事实")
         log.info("%s 季度三表已更新（%d 个事实）", symbol, count)
     return ok_count, failed
+
+
+# ---------- 期权链快照（个股/指数 CSP 前向数据集）----------
+# yfinance 只给"今天"的期权链，没有历史 → 想回测个股卖 put 只能从今天起每天自己存。
+# 这里只存 put、只存周五（周度标准）到期、只存 CSP 关心的虚值带，控制体积。
+
+def select_expirations(expirations, as_of: str, min_dte: int, max_dte: int) -> list[str]:
+    """从全部到期日里挑出 [min_dte, max_dte] 日历天内的周度标准到期日。
+
+    SPY/QQQ 有每日到期（周一~周五），全存会把体积放大 5 倍且对月度 CSP 研究无用：
+    只保留周五；若某周因假日没有周五到期（如耶稣受难日），保留该周的周四。"""
+    base = pd.Timestamp(as_of)
+    in_window = []
+    for e in expirations:
+        ts = pd.Timestamp(e)
+        if min_dte <= (ts - base).days <= max_dte and ts.weekday() in (3, 4):
+            in_window.append(ts)
+    weeks: dict[tuple, pd.Timestamp] = {}
+    for ts in sorted(in_window):
+        key = tuple(ts.isocalendar()[:2])
+        if key not in weeks or ts.weekday() == 4:
+            weeks[key] = ts
+    return [ts.strftime("%Y-%m-%d") for ts in sorted(weeks.values())]
+
+
+def _next_earnings(ticker, as_of: str) -> str | None:
+    """下一次财报日（>= as_of）；拿不到返回 None（ETF 本来就没有）。"""
+    try:
+        cal = ticker.calendar
+    except Exception:  # noqa: BLE001
+        return None
+    dates = cal.get("Earnings Date") if isinstance(cal, dict) else None
+    if not dates:
+        return None
+    future = sorted(pd.Timestamp(d) for d in dates if pd.Timestamp(d) >= pd.Timestamp(as_of))
+    return future[0].strftime("%Y-%m-%d") if future else None
+
+
+def fetch_option_puts(symbol: str, as_of: str, spot: float, min_dte: int = 7,
+                      max_dte: int = 60, moneyness: tuple[float, float] = (0.75, 1.02),
+                      pause: float = 0.2) -> tuple[pd.DataFrame, str | None]:
+    """拉一个标的当天的 put 链（窗口内到期日 × 行权价/现价在 moneyness 区间）。
+
+    返回 (quotes, next_earnings)。quotes 列：expiration/option_type/strike/bid/ask/last/
+    volume/open_interest/iv/last_trade。拉取失败抛 RuntimeError。"""
+    ticker = yf.Ticker(symbol)
+    try:
+        expirations = ticker.options
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(f"{symbol}: 到期日列表拉取失败: {e}") from e
+    if not expirations:
+        raise RuntimeError(f"{symbol}: 无期权到期日（疑似限流或无期权）")
+    lo, hi = moneyness[0] * spot, moneyness[1] * spot
+    frames = []
+    for exp in select_expirations(expirations, as_of, min_dte, max_dte):
+        try:
+            puts = ticker.option_chain(exp).puts
+        except Exception as e:  # noqa: BLE001
+            log.warning("%s %s 期权链拉取失败: %s", symbol, exp, e)
+            continue
+        if puts is None or puts.empty:
+            continue
+        puts = puts[(puts["strike"] >= lo) & (puts["strike"] <= hi)]
+        frames.append(pd.DataFrame({
+            "expiration": exp,
+            "option_type": "put",
+            "strike": puts["strike"].astype(float),
+            "bid": puts.get("bid"),
+            "ask": puts.get("ask"),
+            "last": puts.get("lastPrice"),
+            "volume": puts.get("volume"),
+            "open_interest": puts.get("openInterest"),
+            "iv": puts.get("impliedVolatility"),
+            "last_trade": puts.get("lastTradeDate"),
+        }))
+        time.sleep(pause)
+    quotes = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    return quotes, _next_earnings(ticker, as_of)
+
+
+def update_option_snapshots(conn, symbols: list[str], min_dte: int = 7, max_dte: int = 60,
+                            moneyness: tuple[float, float] = (0.75, 1.02),
+                            report: dict | None = None) -> tuple[int, list[str]]:
+    """逐标的存当天期权快照。快照日 = 该标的库内最新行情日（报价对应的交易日），
+    spot 也取库内该日收盘——与日后结算用的价格同源。同日已存则跳过（幂等）。
+
+    返回 (成功数, 失败列表)；单个失败只记日志，不中断批量，也不影响信号主流程。"""
+    ok, failed = 0, []
+    for symbol in symbols:
+        as_of = store.latest_price_date(conn, symbol)
+        if not as_of:
+            failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", "库内无行情，无法确定快照日与现价")
+            continue
+        if store.has_option_snapshot(conn, as_of, symbol):
+            if report is not None:
+                report[symbol] = ("skipped", f"{as_of} 已有快照")
+            continue
+        px = store.load_prices(conn, symbol, start=as_of)
+        spot = float(px["close"].iloc[-1])
+        try:
+            quotes, earnings = fetch_option_puts(symbol, as_of, spot, min_dte, max_dte, moneyness)
+        except Exception as e:  # noqa: BLE001
+            log.error("%s 期权快照失败: %s", symbol, e)
+            failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", str(e))
+            continue
+        if quotes.empty:
+            failed.append(symbol)
+            if report is not None:
+                report[symbol] = ("failed", "窗口内无报价")
+            continue
+        captured_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        n = store.save_option_snapshot(conn, as_of, symbol, spot, earnings, quotes, captured_at)
+        log.info("%s 期权快照 %s：%d 条 put 报价", symbol, as_of, n)
+        ok += 1
+        if report is not None:
+            report[symbol] = ("updated", f"{as_of} {n} 条")
+    return ok, failed

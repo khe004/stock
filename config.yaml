@@ -258,6 +258,64 @@ model_portfolio:
   # （不喂给任何策略），此处只作组合成分。
   # 诚实通则：成分沿用月首日调仓故仍带 timing luck；配方是拿全历史挑的，属轻度 in-sample。
 
+# 期权链每日快照（2026-10 评估 PutFinder 后加入）：yfinance 只给当天的链、没有历史，
+# 个股卖 put（CSP）想回测只能从今天起自己攒 point-in-time 数据。这里只采集不出信号、不推送。
+# 只存 put、只存周五到期、只存行权价/现价 0.75~1.02 的虚值带（CSP 关心的区间），控制库体积
+# （约 1 万行/天，一年约 250 万行）。标的必须在 update_symbols 里（结算要用到期日收盘价）。
+options_research:
+  enabled: true
+  min_dte: 7                # 日历天
+  max_dte: 60
+  moneyness: [0.75, 1.02]   # 行权价 / 现价
+  symbols:
+    # 指数 ETF：与「合成 SPY 卖 put」回测对照，也是 VRP 最可靠的地方
+    - SPY
+    - QQQ
+    - IWM
+    # 个股：大市值、期权流动性好，覆盖低波防御到高波成长（检验"高 IV 是否真给更多 VRP"）
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+    - AVGO
+    - AMD
+    - NFLX
+    - ORCL
+    - CRM
+    - ADBE
+    - PLTR
+    - MU
+    - INTC
+    - QCOM
+    - NOW
+    - DDOG
+    - STX
+    - JPM
+    - BAC
+    - GS
+    - V
+    - MA
+    - XOM
+    - CVX
+    - UNH
+    - LLY
+    - JNJ
+    - MRK
+    - PFE
+    - PG
+    - KO
+    - WMT
+    - COST
+    - HD
+    - MCD
+    - DIS
+    - BA
+    - CAT
+    - UBER
+
 # 阶段 2：季度三表首批跨市场验证样本（不构成投资筛选）
 quarterly_research:
   symbols: [NVDA, MU, VRT, MSFT, DLR, TSM, 005930.KS, ARM]

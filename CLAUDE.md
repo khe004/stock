@@ -12,7 +12,8 @@ python run_daily.py --date 2026-07-03     # 补跑某日信号（幂等）
 python run_daily.py --full-refresh        # 全量重拉行情（复权价拼接错位，季度一次）
 python run_daily.py --backfill             # 补全量历史信号入库（标记已通知不推送）
 python run_daily.py --research-only        # 只刷新基本面与 AI 基建财报，不跑策略/通知
-streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K线/动量排名/市场筛选/避险手册/策略评分/策略相关性/回测/策略说明）
+python run_daily.py --no-options           # 跳过期权链快照采集（默认联网运行时自动采集）
+streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K线/动量排名/市场筛选/AI基建/避险手册/策略评分/策略相关性/回测/卖put研究/策略说明）
 ```
 
 ## 架构速览
@@ -20,7 +21,8 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 - `run_daily.py`：主入口。拉数据 → 各策略 generate → 信号入库（唯一约束幂等）→ dispatch 推送
 - `quant/config.py`：config.yaml + .env；`update_symbols` = watchlist + 各策略 universe_file
 - `quant/data/`：yfinance 增量拉取（首拉空表报错）、SQLite；季度三表按 snapshot + facts
-  保存来源/币种/抓取时间与历史版本，最新快照缺失值不从旧版拼接
+  保存来源/币种/抓取时间与历史版本，最新快照缺失值不从旧版拼接；
+  `option_snapshots`/`option_quotes` 存每日期权链快照（见下「卖 put 研究」）
 - `quant/strategies/`：基类 `generate(prices: dict[symbol, df]) -> list[Signal]`，对**全量历史**出信号；
   每日运行筛当天，回测用完整序列。注册在 `__init__.py` 的 REGISTRY。`selectors.py`（2026-07-30
   抽出）收敛了 6 个策略里各自独立抄写的 12-1 动量公式与强度映射（`momentum_return`/
@@ -38,8 +40,11 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
   `suggest_low_corr_set` 贪心挑低相关成分，供相关性页的「🧺 模型组合」用——对 specification risk
   与「策略有时效性」的实操回答：不是找永远有效的那个，而是同时持有几个决策方式不同、相互低相关的）、
   screening.py（市场筛选：个股/板块当前强弱快照；综合分=动量半[12-1动量/52周位置/距均线三维横截面]+价值半[forward盈利收益率+EV/EBITDA收益率双口径的行业内百分位，抗一次性收益畸变；金融EV/EBITDA失效则只用forward]，当前基本面快照非point-in-time）、
-  quarterly.py（季度同比、利润率、现金流与连续四季 TTM；缺季度不凑数）
-- `quant/web/app.py`：十一页面板（市场概览/信号历史/K线/动量排名/市场筛选/AI基建/避险手册/策略评分/策略相关性/回测/策略说明）；
+  quarterly.py（季度同比、利润率、现金流与连续四季 TTM；缺季度不凑数）、
+  putwrite.py（合成 SPY 卖 put：SPY close + VIX 当 IV + BS 定价，月度全额担保，公平基准是
+  **β 匹配混合**、另给**扣现金夏普**——平台夏普不扣无风险利率，会把半仓现金的东西抬高）、
+  option_forward.py（期权快照 → 机械选约 ≈30天/|Δ|0.25/买价成交 → 到期按收盘结算 → 指数/个股分组汇总）
+- `quant/web/app.py`：十二页面板（市场概览/信号历史/K线/动量排名/市场筛选/AI基建/避险手册/策略评分/策略相关性/回测/卖put研究/策略说明）；
   避险手册页（`analysis/drawdowns.py`）：SPY 识别历史下跌段→每段测各避险资产总回报→崩盘类型自动判定
   （闪崩/通缩型-TLT有效/通胀型-TLT失效需商品黄金），含当前进行中回撤的实时"对号入座"；
   回测页按策略分单标的/组合/智能定投/VIX 四种渲染模式，组合模式含「🧭 稳健性检验」折叠区；
@@ -181,5 +186,14 @@ aggressive_mom 改持 BIL（1-3月短债 ETF，近零波动零久期，2007+ 全
 - **板块 momentum 已由 63日/每日 改为 252/skip21 月度**（旧版跑输板块等权，whipsaw +
   短期反转所致；交易 932→84 次）。2026-09-16 复算中月首日仍是四个调仓日里最差的
   （+286% vs 第11日 +342%），错峰口径 +308%/年化12.8%——文档数字偏保守而非偏乐观。
+- **卖 put / CSP 研究（2026-10-06，起因：评估 PutFinder）：仅研究，不进实盘、不出信号。**
+  PutFinder 是个股 CSP 每日排行榜（质量×合约适配×财报门），自称描述性排名、无回测；不接它的打分。
+  (a) 指数腿：外部 1990–2018 数据（GitHub 上的 SPX 日线 + VIX，短债利率为年均近似）合成 30Δ 卖 put，
+  对 β 匹配混合超额年化 1990s +4.4% / 2000s +5.1% / 2010–2018 仅 +0.4%（扣现金夏普 0.48 输 0.75）；
+  IV×0.9 即全期 +1.1%、2010–2018 转负 → **合成回测精度不足以分辨 VRP 大小**；与 SPY 日相关 0.84–0.91，
+  对股票为主的模型组合几乎不分散。本库 2015+ 的数字在面板「🧾 卖put研究」看（需用户 Mac 真实数据）。
+  (b) 个股腿：yfinance 无历史期权链 → `config.options_research` 的 45 个标的每日存快照（`run_daily`
+  联网时自动，约 1 万行/天），面板做前向结算。**至少攒 1–2 年、经历一次 ≥10% 回撤再下结论**；
+  届时可信检验是「排名前 N vs 同日全部候选等权」（决策 #3）。历史个股期权数据只有付费源（ORATS/ThetaData 等）。
 - **回测页有可选「波动率缩放」开关**（无杠杆减仓，降回撤/尾部，实测不提升夏普；仅分析用
   不改实盘信号）。用户可调目标波动率与回看窗口；cap=1.0 只减仓不加杠杆（实测加杠杆有害）。

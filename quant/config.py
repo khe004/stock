@@ -82,6 +82,19 @@ class Config:
         return out
 
     @property
+    def options_research(self) -> dict:
+        """期权链快照采集配置（enabled/symbols/min_dte/max_dte/moneyness）。"""
+        raw = self.raw.get("options_research", {}) or {}
+        lo, hi = raw.get("moneyness", [0.75, 1.02])
+        return {
+            "enabled": bool(raw.get("enabled", False)),
+            "symbols": list(dict.fromkeys(raw.get("symbols", []))),
+            "min_dte": int(raw.get("min_dte", 7)),
+            "max_dte": int(raw.get("max_dte", 60)),
+            "moneyness": (float(lo), float(hi)),
+        }
+
+    @property
     def telegram_enabled(self) -> bool:
         return bool(self.raw.get("notify", {}).get("telegram", False))
 

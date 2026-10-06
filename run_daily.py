@@ -152,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
                              "用于初始化或找回信号历史")
     parser.add_argument("--no-fundamentals", action="store_true",
                         help="跳过基本面抓取")
+    parser.add_argument("--no-options", action="store_true",
+                        help="跳过期权链快照采集")
     parser.add_argument("--fundamentals-only", action="store_true",
                         help="只更新基本面与年度财报然后退出（用于单独补抓）")
     parser.add_argument("--research-only", action="store_true",
@@ -254,6 +256,17 @@ def main(argv: list[str] | None = None) -> int:
             log.info("季度三表更新完成：成功 %d，失败 %d", quarterly_ok, len(quarterly_fail))
         except Exception:  # noqa: BLE001
             log.error("季度三表抓取整体异常，不影响信号主流程", exc_info=True)
+
+    # ── 期权链快照（个股/指数 CSP 前向数据集，只采集不出信号）──
+    opt = cfg.options_research
+    if not args.no_fetch and not args.no_options and opt["enabled"] and opt["symbols"]:
+        try:
+            log.info("采集 %d 个标的期权链快照…", len(opt["symbols"]))
+            opt_ok, opt_fail = fetcher.update_option_snapshots(
+                conn, opt["symbols"], opt["min_dte"], opt["max_dte"], opt["moneyness"])
+            log.info("期权快照完成：成功 %d，失败 %d", opt_ok, len(opt_fail))
+        except Exception:  # noqa: BLE001
+            log.error("期权快照整体异常，不影响信号主流程", exc_info=True)
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}
