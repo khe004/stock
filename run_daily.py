@@ -140,6 +140,28 @@ def build_market_overview(prices: dict, cfg) -> str:
     return "\n".join(lines)
 
 
+def _strategy_symbols(cfg, params: dict) -> list[str]:
+    """某策略实际喂入的标的：groups + universe_file（去重保序）。"""
+    symbols = cfg.symbols_for(params.get("groups", []))
+    if params.get("universe_file"):
+        symbols += [s for s in cfg.universe_symbols(params["universe_file"])
+                    if s not in symbols]
+    return symbols
+
+
+def latest_signal_date(prices: dict, strategy_symbols: list[str]) -> str:
+    """信号日期 = 策略标的里最新的行情日。
+
+    不能对全库取 max：macro / fx_rates / ai_infra 里的亚洲股、汇率、BTC 在美西下午
+    已经是次日日期，会把信号日期顶到美股还没有数据的那天，`s.date == as_of` 永远
+    匹配不上，当天信号被静默丢弃（2026-10-06 发现，周一至周四的信号因此全漏）。
+    """
+    dated = [prices[s].index.max() for s in strategy_symbols if s in prices]
+    if not dated:  # 没有启用任何策略：退回全库最新日，只影响日报标题
+        dated = [df.index.max() for df in prices.values()]
+    return max(dated).strftime("%Y-%m-%d")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="每日投资信号")
     parser.add_argument("--date", help="只保留该日期(YYYY-MM-DD)的信号，默认取行情最新一天（用于补跑）")
@@ -274,17 +296,16 @@ def main(argv: list[str] | None = None) -> int:
         log.error("库内没有任何行情数据，退出")
         return 1
 
-    as_of = args.date or max(df.index.max() for df in prices.values()).strftime("%Y-%m-%d")
+    strategy_symbols = {name: _strategy_symbols(cfg, params)
+                        for name, params in cfg.enabled_strategies()}
+    as_of = args.date or latest_signal_date(
+        prices, [s for syms in strategy_symbols.values() for s in syms])
     log.info("信号日期: %s%s", as_of, "（backfill：补全量历史信号）" if args.backfill else "")
 
     all_new: list = []
     for name, params in cfg.enabled_strategies():
         strat = strategies.build(name, params)
-        group_symbols = cfg.symbols_for(params.get("groups", []))
-        if params.get("universe_file"):
-            group_symbols += [s for s in cfg.universe_symbols(params["universe_file"])
-                              if s not in group_symbols]
-        group_prices = {s: prices[s] for s in group_symbols if s in prices}
+        group_prices = {s: prices[s] for s in strategy_symbols[name] if s in prices}
         sigs = strat.generate(group_prices)
         if not args.backfill:
             sigs = [s for s in sigs if s.date == as_of]
