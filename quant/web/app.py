@@ -1670,12 +1670,38 @@ def render_strategy_docs():
         "lookback_days": 252, "skip_days": 21, "top_n": 6, "max_per_sector": 2,
         "regime_symbol": "SPY", "regime_ma": 200, "safe_asset": "TLT",
     })
-    st.markdown(f"""
-## 策略如何配合
+    # ── 当前实际配置：直接读 config，不靠手写文字 ──
+    st.subheader("当前配置一览")
+    in_portfolio = set(cfg.model_portfolio)
+    status_rows = []
+    for name, params in (cfg.raw.get("strategies") or {}).items():
+        if not params.get("enabled", False):
+            state = "未启用"
+        elif params.get("notify", True):
+            state = "📣 推送"
+        else:
+            state = "👀 仅观察（入库不推送）"
+        pool = "、".join(params.get("groups", []))
+        if params.get("universe_file"):
+            pool = (pool + " + " if pool else "") + params["universe_file"]
+        status_rows.append({"策略": name, "状态": state,
+                            "模型组合成分": "✅" if name in in_portfolio else "",
+                            "候选池（config 的 groups / 名单文件）": pool})
+    st.dataframe(pd.DataFrame(status_rows), width="stretch", hide_index=True)
+    hold_assets = cfg.model_portfolio_hold_assets
+    st.caption("以上读自 `config.yaml`，与每日运行一致。**每个策略独立出信号，平台不会把它们合并成一条"
+               "统一的执行规则**；唯一的组合层是「模型组合」（各成分等权"
+               + (f"，另含买入持有的 {'、'.join(hold_assets)}" if hold_assets else "")
+               + "），见「策略相关性」页，当前目标持仓见「信号历史」页顶部。")
 
-**双均线管大方向**（该在场内还是场外）→ **动量管配置**（钱放哪个板块）→ **RSI 管时机**（回调到哪天动手）。
-同一天出现矛盾信号时以大方向为准：大盘死叉之下的逆势买入信号，轻仓或忽略。
-**智能定投**和**双动量**是独立的完整打法（自带仓位规则），直接以"跑赢定投"为目标，可作为主力策略单独执行。
+    st.markdown(f"""
+## 人工参考：几个单标的策略可以怎么搭配看
+
+> 这一段是**阅读信号时的人工参考思路，平台没有按它执行任何规则**。
+
+**双均线看大方向**（该在场内还是场外）→ **动量看配置**（钱放哪个板块）→ **RSI 看时机**（回调到哪天动手）。
+同一天出现矛盾信号时可以大方向为准：大盘死叉之下的逆势买入信号，轻仓或忽略。
+**智能定投**和**双动量**是独立的完整打法（自带仓位规则），可单独执行。
 
 ---
 
