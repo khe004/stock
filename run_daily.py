@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from quant import strategies
+from quant.analysis.health import check_health
 from quant.analysis.quarterly_validation import (
     apply_official_quarterly_fallbacks,
     load_official_baselines,
@@ -281,14 +282,17 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── 期权链快照（个股/指数 CSP 前向数据集，只采集不出信号）──
     opt = cfg.options_research
+    options_result: tuple[int, list[str]] | None = None
     if not args.no_fetch and not args.no_options and opt["enabled"] and opt["symbols"]:
         try:
             log.info("采集 %d 个标的期权链快照…", len(opt["symbols"]))
             opt_ok, opt_fail = fetcher.update_option_snapshots(
                 conn, opt["symbols"], opt["min_dte"], opt["max_dte"], opt["moneyness"])
             log.info("期权快照完成：成功 %d，失败 %d", opt_ok, len(opt_fail))
+            options_result = (opt_ok, list(opt_fail))
         except Exception:  # noqa: BLE001
             log.error("期权快照整体异常，不影响信号主流程", exc_info=True)
+            options_result = (0, list(opt["symbols"]))
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}
@@ -301,6 +305,16 @@ def main(argv: list[str] | None = None) -> int:
     as_of = args.date or latest_signal_date(
         prices, [s for syms in strategy_symbols.values() for s in syms])
     log.info("信号日期: %s%s", as_of, "（backfill：补全量历史信号）" if args.backfill else "")
+
+    watchlist_symbols = set(cfg.all_symbols)
+    fed_symbols = [s for syms in strategy_symbols.values() for s in syms]
+    health = check_health(
+        prices, fed_symbols, cfg.update_symbols,
+        as_of, _date.today(), fetch_failed=failed, options=options_result,
+        pool_symbols={s for s in fed_symbols if s not in watchlist_symbols},
+        check_run_lag=not (args.date or args.no_fetch))
+    for line in health.render().splitlines():
+        (log.info if health.ok else log.warning)("%s", line)
 
     all_new: list = []
     for name, params in cfg.enabled_strategies():
@@ -332,7 +346,8 @@ def main(argv: list[str] | None = None) -> int:
             store.mark_notified(conn, [r["id"] for r in observe_rows])
             log.info("仅观察策略 %d 条信号已入库不推送", len(observe_rows))
 
-        overview = build_market_overview(prices, cfg)
+        overview = health.render() + "\n\n" + build_market_overview(prices, cfg)
+        flag = "" if health.ok else "⚠️ "
         channels = (["telegram"] if cfg.telegram_enabled else []) + (
             ["email"] if cfg.email_enabled else [])
         if notify_rows:
@@ -348,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
                         log.info("%s 已送达全部待处理信号，跳过重复发送", channel)
                         continue
                     body = format_message(channel_rows) + "\n\n" + overview
-                    subject = f"📈 投资日报 {as_of}（{len(channel_rows)} 条信号）"
+                    subject = f"{flag}📈 投资日报 {as_of}（{len(channel_rows)} 条信号）"
                     if send_channel(channel, subject, body):
                         store.mark_channel_delivered(
                             conn, [int(r["id"]) for r in channel_rows], channel)
@@ -363,12 +378,9 @@ def main(argv: list[str] | None = None) -> int:
                 log.info("渠道级通知完成 %d/%d 条", len(completed), len(signal_ids))
         else:
             body = f"📭 今日无新信号（{as_of}）\n\n" + overview
-            subject = f"📊 投资日报 {as_of}（市场概览）"
+            subject = f"{flag}📊 投资日报 {as_of}（市场概览）"
             ok = dispatch(cfg, subject, body)
             log.info("无信号日报发送%s", "成功" if ok else "失败")
-        if failed:
-            shown = ", ".join(failed[:20]) + (f" 等 {len(failed)} 个" if len(failed) > 20 else "")
-            dispatch(cfg, "⚠️ 量化数据更新失败", f"⚠️ 数据更新失败: {shown}，信号可能不完整")
 
         if cfg.research_digest_enabled:
             digest_body, digest_hash = build_research_digest(conn)
