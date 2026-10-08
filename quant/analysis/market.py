@@ -49,6 +49,24 @@ def sector_breadth(sector_closes: dict[str, pd.Series], ma: int = 200) -> dict:
 def yield_curve_spread(long_yield: pd.Series, short_yield: pd.Series) -> float | None:
     """长端减短端收益率利差（百分点），负值代表倒挂。yfinance 的 ^TNX/^IRX
     已是百分比数值（如 4.5 代表 4.5%），直接相减即可。"""
-    if long_yield.empty or short_yield.empty:
+    dated = spread_on_common_date(long_yield, short_yield)
+    return None if dated is None else dated[0]
+
+
+def spread_on_common_date(a: pd.Series, b: pd.Series) -> tuple[float, object] | None:
+    """两条序列在**最近一个共同有效日**上的差 (a - b, 该日期)；没有共同日期返回 None。
+
+    各取各的最后一条再相减，在其中一条没更新时会把两个不同日子的数字相减，
+    而且看不出来——利差、VIX 期限结构这类跨序列指标必须对齐日期。
+    """
+    pair = pd.concat([a, b], axis=1, join="inner").dropna()
+    if pair.empty:
         return None
-    return float(long_yield.iloc[-1]) - float(short_yield.iloc[-1])
+    return float(pair.iloc[-1, 0] - pair.iloc[-1, 1]), pair.index[-1]
+
+
+def stale_items(last_dates: dict[str, object], ref_date, tolerance_days: int = 0) -> dict[str, object]:
+    """最新日期早于参考日（超过容忍天数）的项目 → {名称: 其最新日期}，供页面逐项标注。"""
+    ref = pd.Timestamp(ref_date)
+    return {k: v for k, v in last_dates.items()
+            if (ref - pd.Timestamp(v)).days > tolerance_days}

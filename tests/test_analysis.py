@@ -1084,3 +1084,16 @@ def test_window_stats_rejects_series_starting_after_window():
     late = pd.Series(range(100, 110), index=idx, dtype=float)
     assert window_stats(late, pd.Timestamp("2024-01-02"), idx[-1]) is None
     assert window_stats(late, idx[0], idx[-1]) is not None
+
+
+def test_spread_uses_last_common_date_when_series_are_misaligned():
+    from quant.analysis.market import spread_on_common_date, stale_items
+    d = pd.to_datetime(["2026-10-05", "2026-10-06", "2026-10-07"])
+    long_y = pd.Series([4.5, 4.6, 4.9], index=d)
+    short_y = pd.Series([5.0, 5.1], index=d[:2])            # 短端没更新到最新一天
+    value, on = spread_on_common_date(long_y, short_y)
+    assert value == pytest.approx(4.6 - 5.1) and on == d[1]
+    assert yield_curve_spread(long_y, short_y) == pytest.approx(-0.5)
+    other = pd.Series([1.0], index=pd.to_datetime(["2020-01-01"]))
+    assert spread_on_common_date(long_y, other) is None
+    assert stale_items({"A": d[2], "B": d[0]}, d[2]) == {"B": d[0]}

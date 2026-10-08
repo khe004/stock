@@ -21,7 +21,8 @@ from quant.analysis.correlation import (
     strategy_return_series,
     suggest_low_corr_set,
 )
-from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
+from quant.analysis.market import (ETF_NAMES, etf_label, range_position, sector_breadth,
+                                   spread_on_common_date, stale_items)
 from quant.analysis.robustness import (defensive_symbols, equal_weight_equity,
                                        pool_equal_weight_equity,
                                       leverage_to_target_vol, levered_returns,
@@ -163,6 +164,15 @@ def render_market_overview():
         return
 
     _data_date_caption(prices)
+    us_dates = [prices[s].index[-1] for s in ("^GSPC", "^IXIC", "^DJI", "^RUT")
+                if s in prices and not prices[s].empty]
+    if us_dates:
+        # 顶部日期只代表美股指数；个别瓷砖没更新到这天的逐项标出，不让最新记录遮住陈旧数据
+        behind = stale_items({s: df.index[-1] for s, df in prices.items() if not df.empty},
+                             max(us_dates))
+        if behind:
+            st.caption("⚠️ 以下项目未更新到上述日期：" + "、".join(
+                f"{etf_label(s)}（截至 {pd.Timestamp(d):%m-%d}）" for s, d in behind.items()))
 
     for row in (MACRO_ROW1, MACRO_ROW2):
         cols = st.columns(len(row))
@@ -200,9 +210,9 @@ def render_market_overview():
             icon, label = "🟢", "中性"
         note = ""
         if vix3m is not None and not vix3m.empty:
-            spread = yield_curve_spread(vix["close"], vix3m["close"])
-            if spread is not None and spread >= 0:
-                note = "，期限结构倒挂"
+            term = spread_on_common_date(vix["close"], vix3m["close"])
+            if term is not None and term[0] >= 0:
+                note = f"，期限结构倒挂（{term[1]:%m-%d}）"
         lights.append(("恐慌温度", icon, f"VIX {v:.1f}（{label}）{note}"))
     else:
         lights.append(("恐慌温度", "⚪", "数据不足"))
@@ -217,10 +227,13 @@ def render_market_overview():
 
     tnx = prices.get("^TNX")
     if tnx is not None and not tnx.empty and not irx.empty:
-        spread = yield_curve_spread(tnx["close"], irx["close"])
-        icon = "🔴" if spread is not None and spread < 0 else "🟢"
-        lights.append(("收益率曲线", icon,
-                       f"10年-3月利差 {spread:+.2f}pp" if spread is not None else "数据不足"))
+        dated = spread_on_common_date(tnx["close"], irx["close"])
+        if dated is None:
+            lights.append(("收益率曲线", "⚪", "两条利率没有共同日期，无法计算"))
+        else:
+            spread, spread_date = dated
+            lights.append(("收益率曲线", "🔴" if spread < 0 else "🟢",
+                           f"10年-3月利差 {spread:+.2f}pp（{spread_date:%m-%d}）"))
     else:
         lights.append(("收益率曲线", "⚪", "数据不足"))
 
@@ -2129,6 +2142,13 @@ def render_market_screen():
         stock_syms = cfg.universe_symbols("universe_sp500.yaml")
         stock_prices = {s: store.load_prices(conn, s) for s in stock_syms}
         stock_prices = {s: df for s, df in stock_prices.items() if not df.empty}
+        # 当前强弱快照只排仍在更新的个股：停更超过 7 天的（退市/被并购）拿旧价格排名是误导
+        n_dormant = 0
+        if stock_prices:
+            newest = max(df.index[-1] for df in stock_prices.values())
+            fresh = {s: df for s, df in stock_prices.items() if (newest - df.index[-1]).days <= 7}
+            n_dormant = len(stock_prices) - len(fresh)
+            stock_prices = fresh
         fdf = store.load_fundamentals(conn)
         latest_fund = (store.load_latest_fundamentals(conn)
                        if not fdf.empty else None)
@@ -2142,8 +2162,21 @@ def render_market_screen():
     stock_str["行业"] = [sec_map.get(s, "") for s in stock_str.index]
     has_val = "value_score" in stock_str.columns
     n_pe = int(stock_str["pe"].notna().sum()) if "pe" in stock_str.columns else 0
-    fund_date = str(latest_fund["date"].iloc[0]) if latest_fund is not None and not latest_fund.empty else "无"
-    st.caption(f"共 {len(stock_str)} 只个股参与排名，截至各自最新交易日。当前按【{sort_label}】排序。"
+    if latest_fund is not None and not latest_fund.empty:
+        fdates = latest_fund.loc[latest_fund.index.intersection(stock_str.index), "date"].astype(str)
+        fund_date = (f"{fdates.max()}" if fdates.nunique() <= 1 else
+                     f"{fdates.min()} ~ {fdates.max()}（{int((fdates == fdates.max()).sum())}/"
+                     f"{len(stock_str)} 只为最新一天）") if len(fdates) else "无"
+    else:
+        fund_date = "无"
+    pdates = pd.Series({s: stock_prices[s].index[-1] for s in stock_str.index})
+    n_latest = int((pdates == pdates.max()).sum())
+    price_note = (f"行情均截至 {pdates.max():%Y-%m-%d}" if n_latest == len(pdates) else
+                  f"行情 {n_latest}/{len(pdates)} 只截至 {pdates.max():%Y-%m-%d}，"
+                  f"其余最早停在 {pdates.min():%Y-%m-%d}")
+    if n_dormant:
+        price_note += f"；另有 {n_dormant} 只行情停更超过 7 天（疑似退市/被并购），未参与排名"
+    st.caption(f"共 {len(stock_str)} 只个股参与排名，{price_note}。当前按【{sort_label}】排序。"
                + (f"综合分=动量半+价值半；价值用 {fund_date} 快照的 forward盈利收益率+EV/EBITDA 双口径"
                   f"（{n_pe} 只有有效远期PE；两口径全缺者价值分空缺、综合分退回只用动量）。价值分已按"
                   f"行业内百分位中性化——「行业内价值分位」列即所在行业内的便宜程度，不是全市场比。" if has_val
