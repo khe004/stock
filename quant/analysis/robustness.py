@@ -26,6 +26,7 @@
 （specification risk），不是找那个永远有效的策略。
 """
 
+import numpy as np
 import pandas as pd
 
 from quant import strategies
@@ -80,6 +81,48 @@ def equal_weight_equity(prices: dict[str, pd.DataFrame], initial_cash: float,
             shares = per * (1 - cost_bps / 1e4) / float(adj.at[first, symbol])
             values.loc[first:, symbol] = shares * adj.loc[first:, symbol]
     return values.sum(axis=1).rename("equal_weight")
+
+
+def pool_equal_weight_equity(prices: dict[str, pd.DataFrame],
+                             pools: dict[pd.Timestamp, list[str]],
+                             initial_cash: float, cost_bps: float = 0.0) -> pd.Series | None:
+    """池子等权基准：每月重建的流动性池内等权持有，**月度再平衡**并按换手扣单边成本。
+
+    与策略共享同一候选超集，幸存者偏差在对比中近似抵消。池子在换池日收盘调整，新池从
+    次日起计收益（与策略"当日收盘成交"同口径）；月内权重随价格漂移，不做每日再平衡。
+    旧实现用"每日收益横截面均值"合成 = 隐含每日再平衡且零成本，还把换池当天的收益算给
+    新池（一日前视）——对一个几十只个股的池子，这会系统性抬高基准。
+    """
+    if not pools:
+        return None
+    adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index().ffill()
+    rets = adj.pct_change(fill_method=None).fillna(0.0)
+    col = {s: i for i, s in enumerate(rets.columns)}
+    r = rets.to_numpy()
+    pool_dates = sorted(pools)
+    cost = cost_bps / 1e4
+    holdings = np.zeros(len(col))        # 各标的市值；其余为现金
+    cash = float(initial_cash)
+    values = np.empty(len(rets))
+    i = 0
+    for t, ts in enumerate(rets.index):
+        holdings *= 1.0 + r[t]
+        pending = None
+        while i < len(pool_dates) and pool_dates[i] <= ts:
+            pending = pools[pool_dates[i]]
+            i += 1
+        if pending is not None:
+            members = [col[s] for s in pending if s in col and pd.notna(adj.iat[t, col[s]])]
+            if members:
+                equity = cash + holdings.sum()
+                target = np.zeros(len(col))
+                target[members] = equity / len(members)
+                # 成本从组合里扣：先按换手估成本，再把目标整体缩到扣费后的权益
+                fee = np.abs(target - holdings).sum() * cost
+                target *= (equity - fee) / equity
+                holdings, cash = target, 0.0
+        values[t] = cash + holdings.sum()
+    return pd.Series(values, index=rets.index, name="pool_ew")
 
 
 def _signals(strategy_name: str, params: dict, prices_full: dict[str, pd.DataFrame],

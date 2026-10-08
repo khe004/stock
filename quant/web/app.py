@@ -17,11 +17,13 @@ from quant.analysis.correlation import (
     average_pairwise_corr,
     combined_portfolio,
     correlation_matrix,
+    monthly_rebalanced_portfolio,
     strategy_return_series,
     suggest_low_corr_set,
 )
 from quant.analysis.market import ETF_NAMES, etf_label, range_position, sector_breadth, yield_curve_spread
 from quant.analysis.robustness import (defensive_symbols, equal_weight_equity,
+                                       pool_equal_weight_equity,
                                       leverage_to_target_vol, levered_returns,
                                       robustness_report, split_windows)
 from quant.analysis.scoring import DEFAULT_HORIZONS, signal_forward_returns, summarize_scores
@@ -818,13 +820,22 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
         "事前又分不清哪个在当季——Allocate Smartly 跟踪 90+ 个 TAA 策略，其用户组合 78% 含多个策略、"
         "平均 3.8 个。挑选标准是**决策方式不同 + 相互低相关**，买的是「过程分散」而非只有「资产分散」。\n\n"
         "📅 本节沿用页面顶部的**回测区间**选择（默认近 3 年）——想看全历史请切到「全部」。\n\n"
-        "💡 **几个实测过的配方**（全历史口径，2026-07-28）：`canary_mom` 与 `cross_asset_mom` "
-        "相关 0.76（共享宇宙），所以是**替代**不是补位。把 cross_asset 换成 canary 后夏普 0.96→1.01、"
-        "回撤 -20.6%→-18.0%，且**两个半段的夏普都是全场第一**；`canary+aggressive+low_vol` 三件套"
-        "相关最低(0.38)、夏普最高(1.03)；`canary+aggressive` 双腿杠铃 +454%/回撤-21.2%/Calmar0.75，"
-        "**每一项都优于 SPY 长持**，但只有 2 个成分 = specification risk 最高。"
-        "注意 canary_mom 虽已开启推送，但仍尚无样本外记录。"
+        "⚠️ **这是理论组合诊断，不是账户业绩**：下表把各成分的日收益取平均，等于假设**每天**把资金"
+        "在成分之间拉回等权且不花钱。表下方另给「月度再平衡 + 换手成本」的可执行口径作对照。"
     )
+    with st.expander("📜 历史配方记录（2026-07-28 测算，未按当前数据与配置复核）"):
+        st.caption(
+            "以下数字是 **2026-07-28 当时**用全历史、不含 DBMF 的四策略配方算的，之后回测口径修正过"
+            "（2026-09-16 持仓承接与基准成本）、默认配方也在 2026-08-04 加入了 DBMF。"
+            "**请以本页当前算出的数字为准**，这里只保留当时为什么这样选的记录：\n\n"
+            "- `canary_mom` 与 `cross_asset_mom` 相关 0.76（共享宇宙），是**替代**不是补位；"
+            "把 cross_asset 换成 canary 后夏普 0.96→1.01、回撤 -20.6%→-18.0%。\n"
+            "- `canary+aggressive+low_vol` 三件套相关最低(0.38)、夏普最高(1.03)。\n"
+            "- `canary+aggressive` 双腿杠铃 +454%/回撤-21.2%/Calmar0.75，当时每一项都优于 SPY 长持，"
+            "但只有 2 个成分 = specification risk 最高。\n\n"
+            "这些结论**不能套到含 DBMF 的当前默认配方上**：DBMF 2019-05 才上市，含它的组合只能在"
+            "更短的共同窗口里算。canary_mom 虽已开启推送，仍无样本外记录。"
+        )
 
     # 买入持有型成分（如管理期货 DBMF）：不是策略、没有信号，作为独立收益腿并进来。
     # 只在本小节的局部 frame `ext` 里生效，不碰页面全局 aligned（否则 DBMF 的短历史
@@ -899,6 +910,18 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
             {"总收益": "{:+.1%}", "年化收益": "{:+.1%}", "最大回撤": "{:.1%}",
              "年化波动": "{:.1%}", "夏普": "{:.2f}", "Calmar": "{:.2f}"}),
         width="stretch")
+
+    exec_eq, exec_m = monthly_rebalanced_portfolio(sub, INITIAL_CASH, cfg.cost_bps)
+    if exec_m:
+        st.caption(
+            f"🔧 **可执行口径对照**（成分间每月首个交易日拉回等权，换手扣 {cfg.cost_bps:.0f}bp）："
+            f"总收益 {exec_m['total_return']:+.1%}（理论 {combo_m['total_return']:+.1%}）、"
+            f"年化 {exec_m['cagr']:+.1%}（{combo_m['cagr']:+.1%}）、"
+            f"回撤 {exec_m['max_drawdown']:.1%}（{combo_m['max_drawdown']:.1%}）、"
+            f"夏普 {exec_m['sharpe']:.2f}（{combo_m['sharpe']:.2f}）。"
+            f"区间 {sub.index[0]:%Y-%m-%d} ~ {sub.index[-1]:%Y-%m-%d}，成分：{'、'.join(picked)}。"
+            "两者差距就是「每日再平衡、零成本」这条隐含假设的价值；成分自身的调仓成本两种口径都已计入。"
+        )
 
     avg_c = average_pairwise_corr(ext_corr, picked)
     worst_dd = min(rows[c]["max_drawdown"] for c in picked)     # 回撤是负数，min = 最深
@@ -1118,32 +1141,6 @@ def _render_single_bt(strategy_name: str, params: dict):
         st.caption(f"区间末仍持仓：{result.open_position['entry_date']} 以 ${result.open_position['entry']:.2f} 买入，未平仓部分按区间末市值计入指标。")
 
 
-def pool_equal_weight_equity(prices: dict[str, pd.DataFrame],
-                             pools: dict[pd.Timestamp, list[str]],
-                             initial_cash: float) -> pd.Series | None:
-    """池子等权基准：每月重建的流动性池内等权持有（月度再平衡，不计成本）。
-    与策略共享同一候选超集，幸存者偏差在对比中近似抵消。"""
-    if not pools:
-        return None
-    adj = pd.DataFrame({s: price_series(df) for s, df in prices.items()}).sort_index()
-    rets = adj.pct_change(fill_method=None)
-    pool_dates = sorted(pools)
-    current: list[str] = []
-    i = 0
-    values = []
-    for ts in rets.index:
-        while i < len(pool_dates) and pool_dates[i] <= ts:
-            current = [s for s in pools[pool_dates[i]] if s in rets.columns]
-            i += 1
-        if current:
-            r = rets.loc[ts, current].dropna()
-            values.append(float(r.mean()) if not r.empty else 0.0)
-        else:
-            values.append(0.0)
-    equity = initial_cash * (1 + pd.Series(values, index=rets.index)).cumprod()
-    return equity.rename("pool_ew")
-
-
 def _fmt_metrics_row(m: dict) -> dict:
     return {"总收益": m["total_return"], "年化": m["cagr"], "最大回撤": m["max_drawdown"],
             "夏普": m["sharpe"], "Calmar": m["calmar"]}
@@ -1349,19 +1346,19 @@ def _render_portfolio_bt(strategy_name: str, params: dict):
     # 纯板块策略（如 momentum）：加板块等权基准。用户观察"板块策略全跑输 XLK 长持"，
     # 但 XLK 是事后赢家；板块等权才是去掉幸存者偏差、判断轮动有没有加信息的公平对照。
     if params.get("groups") == ["sectors"]:
-        ew = equal_weight_equity(window_prices, INITIAL_CASH)
+        ew = equal_weight_equity(window_prices, INITIAL_CASH, cost_bps=cfg.cost_bps)
         if ew is not None:
             benchmarks["板块等权"] = ew
     if strategy_name == "stock_momentum":
         # 池子等权：与策略共享同一候选超集，是判断"排名有没有加信息"的最干净对照
         pools = strat.monthly_pools(
             {s: df.loc[start_str:end_str] for s, df in prices.items() if not df.loc[start_str:end_str].empty})
-        pool_ew = pool_equal_weight_equity(window_prices, pools, INITIAL_CASH)
+        pool_ew = pool_equal_weight_equity(window_prices, pools, INITIAL_CASH, cfg.cost_bps)
         if pool_ew is not None:
             benchmarks["池子等权"] = pool_ew
     if strategy_name == "cross_asset_mom":
         # 等权全资产：宇宙内全部标的等权持有，判断"跨资产动量轮动有没有加信息"的公平基准
-        ew = equal_weight_equity(window_prices, INITIAL_CASH)
+        ew = equal_weight_equity(window_prices, INITIAL_CASH, cost_bps=cfg.cost_bps)
         if ew is not None:
             benchmarks["等权全资产"] = ew
 

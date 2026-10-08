@@ -19,6 +19,7 @@
 
 from dataclasses import replace
 
+import numpy as np
 import pandas as pd
 
 from quant.backtest.engine import (
@@ -237,3 +238,33 @@ def combined_portfolio(
     equity.name = "等权组合"
     metrics = equity_metrics(equity, initial_value)
     return equity, metrics
+
+
+def monthly_rebalanced_portfolio(
+    returns_df: pd.DataFrame,
+    initial_value: float = 10_000.0,
+    cost_bps: float = 0.0,
+) -> tuple[pd.Series, dict]:
+    """等权组合的可执行口径：各成分月内随涨跌漂移，每月首个交易日拉回等权并按换手扣成本。
+
+    ``combined_portfolio`` 取日收益均值 = 隐含**每天**把各策略拉回等权且不花钱，没人会这么
+    操作。这里给一个贴近实操的对照，用来量化那条隐含假设值多少钱——差距小才说明理论数字可引用。
+    成本只算组合层（成分之间挪资金）的换手；各成分自身的调仓成本已在其收益序列里。
+    """
+    aligned = returns_df.dropna()
+    if aligned.empty:
+        return pd.Series(dtype=float), {}
+    n = aligned.shape[1]
+    r = aligned.to_numpy()
+    months = aligned.index.to_period("M")
+    sleeves = np.full(n, initial_value / n)
+    values = np.empty(len(aligned))
+    for t in range(len(aligned)):
+        if t > 0 and months[t] != months[t - 1]:
+            total = sleeves.sum()
+            fee = np.abs(total / n - sleeves).sum() * cost_bps / 1e4
+            sleeves = np.full(n, (total - fee) / n)
+        sleeves = sleeves * (1.0 + r[t])
+        values[t] = sleeves.sum()
+    equity = pd.Series(values, index=aligned.index, name="等权组合（月度再平衡）")
+    return equity, equity_metrics(equity, initial_value)

@@ -314,3 +314,31 @@ def test_truncating_prices_before_backtest_drops_carried_over_position():
     # 修复后：窗口内应看到真实的上涨收益（持仓延续），不是全零
     assert (correct_window != 0.0).any()
     assert correct_window.sum() > 0
+
+
+def test_monthly_rebalanced_portfolio_drifts_within_month_and_charges_turnover():
+    import pandas as pd
+    import pytest
+    from quant.analysis.correlation import combined_portfolio, monthly_rebalanced_portfolio
+
+    idx = pd.to_datetime(["2024-01-30", "2024-01-31", "2024-02-01", "2024-02-02"])
+    # A 月内两天各 +10%，B 不动；跨月后 A 再 +10%
+    rets = pd.DataFrame({"A": [0.10, 0.10, 0.0, 0.10], "B": [0.0, 0.0, 0.0, 0.0]}, index=idx)
+    eq, m = monthly_rebalanced_portfolio(rets, 1000.0)
+    # 月内漂移：500*1.21 + 500 = 1105（每日再平衡口径是 1000*1.05^2 = 1102.5）
+    assert eq.iloc[1] == pytest.approx(1105.0)
+    assert combined_portfolio(rets, 1000.0)[0].iloc[1] == pytest.approx(1102.5)
+    # 2 月首日拉回等权 552.5/552.5，之后 A +10%
+    assert eq.iloc[-1] == pytest.approx(552.5 * 1.1 + 552.5)
+    assert m["total_return"] == pytest.approx(eq.iloc[-1] / 1000.0 - 1)
+    # 换手 = |552.5-605| + |552.5-500| = 105，10bp 成本 0.105
+    costed, _ = monthly_rebalanced_portfolio(rets, 1000.0, cost_bps=10)
+    assert costed.iloc[2] == pytest.approx(1105.0 - 0.105)
+
+
+def test_monthly_rebalanced_portfolio_empty_input():
+    import pandas as pd
+    from quant.analysis.correlation import monthly_rebalanced_portfolio
+
+    eq, m = monthly_rebalanced_portfolio(pd.DataFrame({"A": [], "B": []}))
+    assert eq.empty and m == {}
