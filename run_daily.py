@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from quant import strategies
 from quant.analysis.health import check_health
+from quant.analysis.holdings import holdings_report
 from quant.analysis.quarterly_validation import (
     apply_official_quarterly_fallbacks,
     load_official_baselines,
@@ -317,10 +318,12 @@ def main(argv: list[str] | None = None) -> int:
         (log.info if health.ok else log.warning)("%s", line)
 
     all_new: list = []
+    full_signals: dict[str, list] = {}   # 各策略的全历史信号，回放模型持仓用
     for name, params in cfg.enabled_strategies():
         strat = strategies.build(name, params)
         group_prices = {s: prices[s] for s in strategy_symbols[name] if s in prices}
         sigs = strat.generate(group_prices)
+        full_signals[name] = sigs
         if not args.backfill:
             sigs = [s for s in sigs if s.date == as_of]
         log.info("%s: %d 条%s信号", name, len(sigs), "历史" if args.backfill else "当日")
@@ -346,7 +349,10 @@ def main(argv: list[str] | None = None) -> int:
             store.mark_notified(conn, [r["id"] for r in observe_rows])
             log.info("仅观察策略 %d 条信号已入库不推送", len(observe_rows))
 
-        overview = health.render() + "\n\n" + build_market_overview(prices, cfg)
+        holdings_text = holdings_report(full_signals, cfg.model_portfolio,
+                                        cfg.model_portfolio_hold_assets, as_of)
+        overview = "\n\n".join(x for x in (
+            health.render(), holdings_text, build_market_overview(prices, cfg)) if x)
         flag = "" if health.ok else "⚠️ "
         channels = (["telegram"] if cfg.telegram_enabled else []) + (
             ["email"] if cfg.email_enabled else [])

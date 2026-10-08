@@ -246,8 +246,54 @@ def render_market_overview():
                "stock_momentum 章节。")
 
 
+def _model_holding(name: str):
+    """某策略按全历史信号回放出的当前模型持仓（与回测引擎期末持仓一致）。"""
+    from quant.analysis.holdings import replay_holdings
+
+    params = strategy_params.get(name)
+    if params is None:
+        return None
+    symbols = cfg.symbols_for(params.get("groups", []))
+    if params.get("universe_file"):
+        symbols += [s for s in cfg.universe_symbols(params["universe_file"]) if s not in symbols]
+    px = {s: store.load_prices(conn, s) for s in symbols}
+    px = {s: df for s, df in px.items() if not df.empty}
+    if not px:
+        return None
+    return replay_holdings(name, strategies.build(name, params).generate(px))
+
+
+def _render_model_holdings() -> None:
+    """「现在该持有什么」：推荐模型组合各成分的目标持仓与穿透权重，供对账。"""
+    from quant.analysis.holdings import look_through_weights
+
+    names = [n for n in cfg.model_portfolio if n in strategy_params]
+    hold_assets = cfg.model_portfolio_hold_assets
+    holdings = [h for h in (_model_holding(n) for n in names) if h is not None]
+    if not holdings and not hold_assets:
+        return
+    st.subheader("📌 现在该持有什么（模型组合目标持仓）")
+    rows = [{"成分": h.strategy,
+             "目标持仓": (" / ".join(etf_label(s) for s in h.symbols) or "空仓（现金）")
+             if h.replayable else "定投型，无固定持仓",
+             "上次变动": h.last_change or "—",
+             "说明": "" if h.replayable else h.note} for h in holdings]
+    rows += [{"成分": sym, "目标持仓": etf_label(sym), "上次变动": "—", "说明": "买入持有，无信号"}
+             for sym in hold_assets]
+    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    weights = look_through_weights(holdings, hold_assets)
+    if weights:
+        st.caption("穿透权重（各成分等权、成分内等权）：" +
+                   " ｜ ".join(f"**{k}** {v:.0%}" for k, v in weights.items()))
+    st.caption("这是按 `config.yaml` 的 `model_portfolio` 配方、把各策略全历史信号**机械执行**到今天会持有的"
+               "标的（历史重算，与回测引擎期末持仓一致），**不是你的真实账户**。持仓只在策略发出信号的"
+               "调仓日变化，月中排名换位不会改变它。用途是对账：漏了推送或隔了一阵没看，对一下这里即可。")
+
+
 def render_signal_history():
     st.title("信号历史")
+    _render_model_holdings()
+    st.subheader("信号记录")
     col1, col2 = st.columns(2)
     f_strategy = col1.selectbox("策略", ["全部"] + strategy_names)
     f_symbol = col2.selectbox("标的", ["全部"] + cfg.all_symbols)
@@ -353,15 +399,30 @@ def render_momentum_rank():
 
     latest = mom.iloc[-1].dropna().sort_values(ascending=False)
     as_of = mom.index[-1].strftime("%Y-%m-%d")
-    st.caption(f"截至 {as_of}，按 12-1 动量排名（近{MOM_LOOKBACK}日收益、跳过最近{MOM_SKIP}日）；"
-               f"每月首个交易日调仓，前 {MOM_TOP_N} 名为轮动持有对象。"
+    st.caption(f"截至 {as_of}，按 12-1 动量排名（近{MOM_LOOKBACK}日收益、跳过最近{MOM_SKIP}日）。"
+               f"排名每天都在变，但策略只在每月首个交易日按当时的前 {MOM_TOP_N} 名调仓——"
+               f"所以下表的「最新排名」是**候选**，「模型持仓」才是按信号机械执行到今天持有的。"
                f"第 {MOM_TOP_N} 名与第 {MOM_TOP_N + 1} 名动量接近时，进出信号可能是排名噪音。")
+    mom_hold = _model_holding("momentum")
+    held = set(mom_hold.symbols) if mom_hold else set()
+    if mom_hold:
+        top_now = set(latest.index[:MOM_TOP_N])
+        diff = ""
+        if held != top_now:
+            diff = (f"与最新前 {MOM_TOP_N} 名不同：持有但已跌出 "
+                    f"{'、'.join(sorted(held - top_now)) or '无'}；新进前 {MOM_TOP_N} 但未持有 "
+                    f"{'、'.join(sorted(top_now - held)) or '无'}——到下个调仓日才会换。")
+        else:
+            diff = f"与最新前 {MOM_TOP_N} 名一致。"
+        st.info(f"**模型持仓**（上次调仓 {mom_hold.last_change or '—'}，非真实账户）："
+                f"{'、'.join(etf_label(s) for s in mom_hold.symbols) or '空仓'}。{diff}")
 
     table = pd.DataFrame({
         "排名": range(1, len(latest) + 1),
         "板块": [etf_label(s) for s in latest.index],
         "12-1 动量": latest.values,
-        "状态": ["✅ 前3" if i < MOM_TOP_N else "" for i in range(len(latest))],
+        "最新排名": [f"候选前{MOM_TOP_N}" if i < MOM_TOP_N else "" for i in range(len(latest))],
+        "模型持仓": ["✅ 持有" if s in held else "" for s in latest.index],
     })
 
     def top_style(row):
@@ -400,15 +461,22 @@ def render_momentum_rank():
         return
     agg_latest = agg_mom.iloc[-1].dropna().sort_values(ascending=False)
     as_of_agg = agg_mom.index[-1].strftime("%Y-%m-%d")
-    st.caption(f"截至 {as_of_agg}，进攻档在成长 ETF 里持有 12-1 动量最强的前 {agg_tn} 只；"
-               f"现金感知——需动量为正才买，成长全负则切正动量避险，避险也负则切现金等价 BIL 吃短债利率。")
+    st.caption(f"截至 {as_of_agg}，进攻档每月首个交易日在成长 ETF 里买入 12-1 动量最强的前 {agg_tn} 只；"
+               f"现金感知——需动量为正才买，成长全负则切正动量避险，避险也负则切现金等价 BIL 吃短债利率。"
+               f"下表「最新排名」是候选，「模型持仓」是按信号机械执行到今天持有的。")
+    agg_hold = _model_holding("aggressive_mom")
+    agg_held = set(agg_hold.symbols) if agg_hold else set()
+    if agg_hold:
+        st.info(f"**模型持仓**（上次调仓 {agg_hold.last_change or '—'}，非真实账户）："
+                f"{'、'.join(etf_label(s) for s in agg_hold.symbols) or '空仓（现金）'}。")
     growth_rows = [(s, v) for s, v in agg_latest.items() if s not in agg_safe]
     gtable = pd.DataFrame({
         "排名": range(1, len(growth_rows) + 1),
         "成长ETF": [etf_label(s) for s, _ in growth_rows],
         "12-1 动量": [v for _, v in growth_rows],
-        "状态": ["🟢 进攻持有" if (i < agg_tn and v > 0) else ("⚠️ 动量为负" if v <= 0 else "")
-                 for i, (_, v) in enumerate(growth_rows)],
+        "最新排名": [f"候选前{agg_tn}" if (i < agg_tn and v > 0) else ("⚠️ 动量为负" if v <= 0 else "")
+                     for i, (_, v) in enumerate(growth_rows)],
+        "模型持仓": ["✅ 持有" if s in agg_held else "" for s, _ in growth_rows],
     })
 
     def agg_style(row):
