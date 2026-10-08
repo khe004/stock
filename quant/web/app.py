@@ -2208,13 +2208,21 @@ def render_drawdown_playbook():
 
     # ── 当前进行中的回撤（对号入座）──
     ongoing = [e for e in episodes if e["ongoing"]]
-    if ongoing:
+    if ongoing and ongoing[0]["maxdd"] > -0.03:
+        # 离高点不到 3% 只是日常波动，不当成"进行中的回撤"去对号入座
+        e = ongoing[0]
+        st.success(f"✅ {bench_sym} 目前在历史新高附近（{e['peak_date']:%Y-%m-%d} 高点以来 "
+                   f"{e['period_return']:+.1%}，期间最深 {e['maxdd']:+.1%}），无像样的进行中回撤。")
+    elif ongoing:
         e = ongoing[0]
         rets = episode_returns(px, e["peak_date"], e["end_date"], cands)
         typ, note = classify_episode(e, rets.get("TLT"))
         days = (e["end_date"] - e["peak_date"]).days
         st.error(f"🔴 **当前进行中的回撤** ｜ 从 {e['peak_date']:%Y-%m-%d} 高点至今 {days} 天，"
-                 f"{bench_sym} {e['maxdd']:+.1%}（{severity(e['maxdd'])}）")
+                 f"{bench_sym} 目前距高点 **{e['period_return']:+.1%}**；期间最深 {e['maxdd']:+.1%}"
+                 f"（{e['trough_date']:%Y-%m-%d}，{severity(e['maxdd'])}）")
+        st.caption(f"下面各避险资产是**高点至今**（{e['peak_date']:%Y-%m-%d} ~ {e['end_date']:%Y-%m-%d}）的总回报，"
+                   f"应与 {bench_sym} 的「目前距高点」比，不是与「期间最深」比。")
         if rets:
             best = max(rets, key=rets.get)
             ranked = sorted(rets.items(), key=lambda x: -x[1])[:4]
@@ -2290,7 +2298,7 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
     哪些回撤防住了、减少多少；哪些没防住；策略触发避险的区段里哪些没对应到真实回撤（假信号），
     错过了多少涨幅。回答用户的具体问题：不是靠机制故事，是把信号和实测回撤直接对表。
     """
-    from quant.analysis.drawdowns import defense_spans, spans_overlap
+    from quant.analysis.drawdowns import defense_spans, spans_overlap, window_stats
 
     # 只列有「明确避险腿/现金等价」概念的策略——其它策略（如 cross_asset_mom）
     # 防守是"空槽持现金"而非切到某个具体标的，跟这里"held ⊆ 避险集合"的判定口径对不上
@@ -2309,10 +2317,12 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
     st.markdown("---")
     st.subheader("🐤 策略实测：防住了吗？")
     st.caption(
-        "把策略的真实信号（月首日调仓口径，与推送一致）跟上面识别出的大回撤段直接对表：这次回撤"
-        "策略有没有在避险、实际少亏/多赚多少；以及策略触发避险的区段里，有多少次根本没对应到"
-        "真实回撤（假信号），白白错过了多少涨幅。「避险」定义为该区段持仓完全落在避险腿/现金等价内"
-        "（不含哨兵资产本身——哨兵只判断开关，从不被持有）。"
+        "把策略**历史重算**的信号（今天的规则与数据、月首日调仓口径）跟上面识别出的大回撤段对表："
+        "同一起止日内策略与基准各自的收益和最深回撤、策略当时有没有处在避险状态；以及策略的避险区段里"
+        "有多少段没对应到本页阈值的回撤。「避险」定义为该区段持仓完全落在避险腿/现金等价内"
+        "（不含哨兵资产本身——哨兵只判断开关，从不被持有）。\n\n"
+        "⚠️ 本表只陈述事实，**不判定因果**：「少跌」且「有避险重叠」不等于是避险机制起的作用——"
+        "重叠可能只占回撤段的一小部分，少跌也可能来自当时持有的其它标的。"
     )
     strat_name = st.selectbox("策略", available,
                               format_func=lambda k: f"{k}（{role_map[k][0]}）", key="dd_strat")
@@ -2332,38 +2342,53 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
     result = run_portfolio_backtest(prices_s, sigs, strat_name, INITIAL_CASH, cfg.cost_bps)
     eq = result.equity
     bench_aligned = bench.reindex(eq.index).ffill()
+    # 末尾"进行中"的段不论深浅都会被识别出来；没到阈值的不算真实回撤，
+    # 否则离高点 0.2% 的日常波动也会让同期的避险区段被记成"对应真实回撤"。
+    episodes = [e for e in episodes if e["maxdd"] <= -thr]
     spans = defense_spans(sigs, eq.index, defense_syms)
 
     # ── 表1：大回撤段 × 策略实际表现 ──────────────────────
     rows1 = []
     for e in episodes:
-        seg = eq.loc[e["peak_date"]:e["end_date"]]
-        if len(seg) < 2:
+        # 策略与基准用同一起止日、同一把尺子；策略权益没覆盖到段起点的不比
+        s_stats = window_stats(eq, e["peak_date"], e["end_date"])
+        b_stats = window_stats(bench_aligned, e["peak_date"], e["end_date"])
+        if s_stats is None or b_stats is None:
             continue
-        strat_ret = float(seg.iloc[-1] / seg.iloc[0] - 1)
-        overlapped = any(spans_overlap(e["peak_date"], e["end_date"], s0, s1) for s0, s1 in spans)
-        if overlapped and strat_ret > e["maxdd"]:
-            verdict = "✅ 避险机制生效"
-        elif strat_ret > e["maxdd"]:
-            verdict = "🟡 分散躲过（非避险机制，选中了别的抗跌标的）"
+        (strat_ret, strat_dd), (bench_ret, bench_dd) = s_stats, b_stats
+        overlap_days = sum(
+            max(0, (min(e["end_date"], s1) - max(e["peak_date"], s0)).days + 1)
+            for s0, s1 in spans if spans_overlap(e["peak_date"], e["end_date"], s0, s1))
+        span_days = (e["end_date"] - e["peak_date"]).days + 1
+        less = strat_ret > bench_ret
+        if less and overlap_days:
+            fact = "少跌，期间有避险"
+        elif less:
+            fact = "少跌，期间无避险"
         else:
-            verdict = "❌ 没防住"
+            fact = "未少跌"
+        end_label = "最新" if e["ongoing"] else f"{e['trough_date']:%m-%d}"
         rows1.append({
-            "回撤段": f"{e['peak_date']:%Y-%m}→{e['trough_date']:%m-%d}",
-            f"{bench_sym}回撤": e["maxdd"],
+            "回撤段": f"{e['peak_date']:%Y-%m-%d}→{end_label}" + ("（进行中）" if e["ongoing"] else ""),
+            f"{bench_sym}同期收益": bench_ret,
             "策略同期收益": strat_ret,
-            "减少的回撤": strat_ret - e["maxdd"],
-            "避险区间覆盖": "是" if overlapped else "否",
-            "结论": verdict,
+            "同期收益差": strat_ret - bench_ret,
+            f"{bench_sym}期间最深回撤": bench_dd,
+            "策略期间最深回撤": strat_dd,
+            "避险天数占比": min(1.0, overlap_days / span_days),
+            "事实描述": fact,
         })
     if rows1:
         t1 = pd.DataFrame(rows1)
-        st.markdown(f"**大回撤段 × {strat_name} 实际表现**")
+        st.markdown(f"**大回撤段 × {strat_name} 同期表现**（每行策略与基准的起止日相同）")
         st.dataframe(
-            t1.style.map(signed_color, subset=["减少的回撤"])
-                    .format({f"{bench_sym}回撤": "{:+.1%}", "策略同期收益": "{:+.1%}",
-                             "减少的回撤": "{:+.1%}"}),
+            t1.style.map(signed_color, subset=["同期收益差"])
+                    .format({f"{bench_sym}同期收益": "{:+.1%}", "策略同期收益": "{:+.1%}",
+                             "同期收益差": "{:+.1%}", f"{bench_sym}期间最深回撤": "{:.1%}",
+                             "策略期间最深回撤": "{:.1%}", "避险天数占比": "{:.0%}"}),
             width="stretch", hide_index=True)
+        st.caption("已结束的回撤段取「峰→谷」，所以基准的同期收益就是它的最深回撤；进行中的段取「峰→最新」，"
+                   "若已反弹则两者不同。策略的最深回撤按同一窗口内自身的运行高点计算。")
 
     # ── 表2：避险区段 × 是否对应真实回撤（假信号检测） ──────
     rows2 = []
@@ -2380,25 +2405,28 @@ def _render_strategy_vs_drawdowns(px: pd.DataFrame, bench: pd.Series, episodes: 
             "天数": (s1 - s0).days,
             "策略同期收益": strat_ret,
             f"{bench_sym}同期涨跌": bench_ret,
-            "错过涨幅": bench_ret - strat_ret,
+            f"{bench_sym}减策略": bench_ret - strat_ret,
             "对应真实回撤": "是" if overlapped else "否",
         })
     if rows2:
         t2 = pd.DataFrame(rows2)
         false_mask = t2["对应真实回撤"] == "否"
         n_false = int(false_mask.sum())
-        costly = t2.loc[false_mask, "错过涨幅"].clip(lower=0)
+        gap_col = f"{bench_sym}减策略"
+        behind = t2.loc[false_mask & (t2[gap_col] > 0), gap_col]
+        detail = (f"，其中 **{len(behind)} 段**基准同期涨得比策略多（单段差距中位数 {behind.median():+.1%}、"
+                  f"最大 {behind.max():+.1%}）" if len(behind) else "")
         st.markdown(f"**避险区段 × 是否对应真实回撤**（共 {len(rows2)} 段避险，**{n_false} 段**没对应到"
-                    f"本页设定的 {thr:.0%} 回撤阈值，其中 **{int((costly > 0).sum())} 段**确实错过了涨幅，"
-                    f"累计错过约 **{costly.sum():+.1%}**）")
+                    f"本页设定的 {thr:.0%} 回撤阈值{detail}）")
         st.dataframe(
-            t2.style.map(signed_color, subset=["错过涨幅"])
+            t2.style.map(signed_color, subset=[gap_col])
                     .format({"策略同期收益": "{:+.1%}", f"{bench_sym}同期涨跌": "{:+.1%}",
-                             "错过涨幅": "{:+.1%}"}),
+                             gap_col: "{:+.1%}"}),
             width="stretch", hide_index=True)
-        st.caption("「对应真实回撤=否」≠ 一定亏——如果那段时间大盘本来就没怎么涨（横盘/微跌），"
-                  "「错过涨幅」会是负数或接近 0，代表避险没花什么代价，只是分类上没匹配到本页设定的"
-                  f"回撤阈值（{thr:.0%}）而已，调低上面的滑杆阈值能看到更多被计入「真实回撤」的段。")
+        st.caption(f"「{gap_col}」为正 = 这段避险期间基准涨得比策略多。各段差距**不能相加**成一个"
+                  "「累计错过」：区段长短不一、本金基数不同，收益率要连乘而不是相加，而且不避险时策略"
+                  "持有的也不是基准。「对应真实回撤=否」只表示没匹配到本页设定的"
+                  f"回撤阈值（{thr:.0%}），调低上面的滑杆阈值能看到更多被计入的段。")
 
 
 # AI 基建赛道概览里的百分比列（显示时 ×100，配 printf 格式；见 render_ai_infra 内注释）

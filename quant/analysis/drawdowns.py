@@ -28,7 +28,11 @@ def find_drawdown_episodes(bench: pd.Series, threshold: float = 0.08) -> list[di
     """在基准总回报序列上找回撤 ≤ threshold 的下跌段（外加末尾进行中的段，不论深浅）。
 
     返回每段：peak_date / trough_date / recover_date(None=未收复) / end_date(测算截止,
-    进行中=最新日) / maxdd / ongoing。
+    进行中=最新日) / maxdd / period_return / ongoing。
+
+    ``maxdd`` 是期间最深回撤（峰→谷）；``period_return`` 是峰→end_date 的收益。已结束的段
+    end_date 就是谷，两者相等；**进行中的段若已从谷底反弹，两者不同**——拿别的资产"峰→最新"
+    的收益去和 maxdd 比，是拿没恢复的数和恢复过的数比。
     """
     bench = bench.dropna()
     n = len(bench)
@@ -58,12 +62,29 @@ def find_drawdown_episodes(bench: pd.Series, threshold: float = 0.08) -> list[di
                     "recover_date": None if ongoing else idx[j],
                     "end_date": idx[-1] if ongoing else idx[trough],
                     "maxdd": maxdd,
+                    "period_return": float(dd.iloc[-1]) if ongoing else maxdd,
                     "ongoing": ongoing,
                 })
             i = j
         else:
             i += 1
     return episodes
+
+
+def window_stats(series: pd.Series, start, end) -> tuple[float, float] | None:
+    """序列在 [start, end] 的 (期间收益, 期间最深回撤)；数据不足或没覆盖到起点返回 None。
+
+    回撤以窗口起点为基准的运行高点计算，保证不同序列用同一把尺子。起点覆盖检查防止
+    晚上市/晚起算的序列用一段更短的区间冒充同期表现。
+    """
+    s = series.loc[start:end].dropna()
+    if len(s) < 2 or float(s.iloc[0]) <= 0:
+        return None
+    if (s.index[0] - pd.Timestamp(start)).days > 5:
+        return None
+    ret = float(s.iloc[-1] / s.iloc[0] - 1)
+    maxdd = float((s / s.cummax() - 1).min())
+    return ret, maxdd
 
 
 def episode_returns(prices: pd.DataFrame, peak_date, end_date,

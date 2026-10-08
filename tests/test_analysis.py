@@ -1056,3 +1056,31 @@ def test_forward_returns_reports_skipped_and_uses_raw_close_for_price_now():
     assert len(fwd) == 1 and fwd.attrs["skipped_no_data"] == 2
     assert fwd.iloc[0]["price_now"] == 110.0            # 原始收盘价
     assert fwd.iloc[0]["ret_now"] == pytest.approx(0.10)  # 复权价算收益
+
+
+def test_ongoing_drawdown_separates_current_from_deepest():
+    from quant.analysis.drawdowns import find_drawdown_episodes, window_stats
+    idx = pd.bdate_range("2024-01-01", periods=6)
+    bench = pd.Series([100, 110, 88, 80, 95, 99], index=idx, dtype=float)   # 先跌后部分恢复
+    ep = find_drawdown_episodes(bench, threshold=0.08)[-1]
+    assert ep["ongoing"]
+    assert ep["maxdd"] == pytest.approx(80 / 110 - 1)
+    assert ep["period_return"] == pytest.approx(99 / 110 - 1)
+    ret, dd = window_stats(bench, ep["peak_date"], ep["end_date"])
+    assert ret == pytest.approx(ep["period_return"]) and dd == pytest.approx(ep["maxdd"])
+
+
+def test_closed_drawdown_period_return_equals_maxdd():
+    from quant.analysis.drawdowns import find_drawdown_episodes
+    idx = pd.bdate_range("2024-01-01", periods=5)
+    bench = pd.Series([100, 85, 90, 101, 102], index=idx, dtype=float)
+    ep = find_drawdown_episodes(bench, threshold=0.08)[0]
+    assert not ep["ongoing"] and ep["period_return"] == ep["maxdd"]
+
+
+def test_window_stats_rejects_series_starting_after_window():
+    from quant.analysis.drawdowns import window_stats
+    idx = pd.bdate_range("2024-03-01", periods=10)
+    late = pd.Series(range(100, 110), index=idx, dtype=float)
+    assert window_stats(late, pd.Timestamp("2024-01-02"), idx[-1]) is None
+    assert window_stats(late, idx[0], idx[-1]) is not None
