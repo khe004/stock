@@ -435,8 +435,10 @@ def _all_strategy_signals() -> tuple[list[Signal], dict[str, str]]:
 
 def render_strategy_scoring():
     st.title("策略评分")
-    st.caption("统计口径：用策略在全量历史上重新生成的信号（与回测同一套逻辑）计算"
-               "信号发出后 5/20/60 个交易日的表现——只看单条信号本身，不涉及仓位与资金曲线。"
+    st.caption("统计口径：**历史重算**——用策略今天的规则和今天库里的复权价，在全量历史上重新生成信号"
+               "（与回测同一套逻辑），再算信号发出后 5/20/60 个交易日的表现。这不是平台运行以来实际推送"
+               "过的信号的成绩（那要看「信号历史」页），而且同一策略的相邻信号窗口相互重叠、并非独立样本。"
+               "只看单条信号本身，不涉及仓位与资金曲线。"
                "buy 信号以上涨为正、sell 信号以下跌为正，已按方向调整符号，可直接跨方向比较正负。")
 
     all_signals, trade_map = _all_strategy_signals()
@@ -453,6 +455,9 @@ def render_strategy_scoring():
         st.warning("信号发生日期与库内行情范围不匹配，暂时算不出前瞻收益")
         return
     summary = summarize_scores(fwd)
+    skipped = int(fwd.attrs.get("skipped_no_data", 0))
+    if skipped:
+        st.caption(f"ℹ️ 另有 {skipped} 条信号因评价标的在信号日缺行情而未计入（缺数据，不是未到期）。")
 
     st.subheader("汇总记分卡")
     show = pd.DataFrame({
@@ -463,6 +468,8 @@ def render_strategy_scoring():
     for h in DEFAULT_HORIZONS:
         show[f"{h}日均收益"] = summary[f"mean_{h}"]
         show[f"{h}日胜率"] = summary[f"win_{h}"]
+        show[f"{h}日样本"] = [f"{n}" + (f"（待到期 {p}）" if p else "")
+                           for n, p in zip(summary[f"n_{h}"], summary[f"pending_{h}"])]
     show = show.sort_values(["策略", "方向"]).reset_index(drop=True)
 
     fmt = {f"{h}日均收益": (lambda v: "" if pd.isna(v) else f"{v:+.1%}") for h in DEFAULT_HORIZONS}
@@ -472,21 +479,27 @@ def render_strategy_scoring():
               .format(fmt))
     st.dataframe(styler, width="stretch", hide_index=True)
 
-    low_sample = summary[summary["low_sample"]]
-    if not low_sample.empty:
-        names = "、".join(f"{r.strategy}({'买入' if r.direction == BUY else '卖出'})"
-                         for r in low_sample.itertuples())
-        st.caption(f"⚠️ 样本不足（信号数 < 10），统计意义弱，仅供参考：{names}")
+    st.caption("胜率与均收益的分母是各周期**已到期**的样本数（「N日样本」列），待到期的信号不计入。")
+    low = []
+    for r in summary.to_dict("records"):
+        weak = [f"{h}日" for h in DEFAULT_HORIZONS if r[f"low_sample_{h}"]]
+        if weak:
+            low.append(f"{r['strategy']}({'买入' if r['direction'] == BUY else '卖出'}："
+                       f"{'/'.join(weak)})")
+    if low:
+        st.caption(f"⚠️ 已到期样本不足 10 条的周期，统计意义弱，仅供参考：{'、'.join(low)}")
 
     st.subheader("信号明细")
-    st.caption("最近 20 条信号的逐条追踪：这是每条信号的真实成绩单，比回测更贴近实际使用体验"
-               "（回测假设机械执行整套策略，这里只看单条信号本身）。未到期的周期显示'待定'。")
+    st.caption("最近 20 条**历史重算**信号的逐条追踪（回测假设机械执行整套策略，这里只看单条信号本身）。"
+               "未到期的周期显示'待定'。价格口径：信号价是信号标的当日原始收盘价，现价是**评价标的**的"
+               "最新原始收盘价，收益列用评价标的的复权价计算（含分红），所以不能用信号价和现价直接相除。"
+               "评价标的与信号标的不同的情况（如 VIX 提醒按 SPY 评价）见「评价标的」列。")
     pick = st.selectbox("策略", sorted(fwd["strategy"].unique()), key="scoring_detail_strategy")
     detail = fwd[fwd["strategy"] == pick].sort_values("date", ascending=False).head(20).copy()
     detail["direction"] = detail["direction"].map({"buy": "买入", "sell": "卖出"})
-    cols = ["date", "symbol", "direction", "signal_price", "price_now",
+    cols = ["date", "symbol", "trade_symbol", "direction", "signal_price", "price_now",
             "ret_now", "ret_5", "ret_20", "ret_60"]
-    names = ["日期", "标的", "方向", "信号价", "现价", "至今收益", "5日收益", "20日收益", "60日收益"]
+    names = ["日期", "标的", "评价标的", "方向", "信号价", "现价", "至今收益", "5日收益", "20日收益", "60日收益"]
     detail = detail[cols]
     detail.columns = names
 

@@ -1025,3 +1025,34 @@ class TestAiInfraLaneSummary:
         }
         s = compute_lane_summary("test", ["A", "B", "C"], caps, growth, {})
         assert s["营收增长中位数"] == pytest.approx(0.50)  # 中位数
+
+
+def test_summarize_scores_counts_pending_and_flags_low_sample_per_horizon():
+    df = pd.DataFrame({
+        "strategy": ["a"] * 4, "direction": ["buy"] * 4,
+        "ret_5": [0.01, -0.02, 0.03, 0.04], "ret_20": [0.05, 0.02, None, None],
+        "ret_60": [None] * 4,
+    })
+    row = summarize_scores(df, horizons=(5, 20, 60), min_samples=3).iloc[0]
+    assert (row["n_5"], row["pending_5"]) == (4, 0)
+    assert (row["n_20"], row["pending_20"]) == (2, 2)
+    assert (row["n_60"], row["pending_60"]) == (0, 4)
+    # 未到期样本不进胜率分母
+    assert row["win_20"] == 1.0
+    assert not row["low_sample_5"] and row["low_sample_20"] and row["low_sample_60"]
+
+
+def test_forward_returns_reports_skipped_and_uses_raw_close_for_price_now():
+    idx = pd.bdate_range("2024-01-01", periods=10)
+    df = pd.DataFrame({"close": [100.0] * 9 + [110.0], "adj_close": [50.0] * 9 + [55.0]}, index=idx)
+    signals = [
+        Signal(date=idx[0].strftime("%Y-%m-%d"), symbol="TEST", strategy="s", direction="buy",
+               price=100.0, strength=0.5, reason="r"),
+        Signal(date="2023-06-01", symbol="TEST", strategy="s", direction="buy", price=1.0, strength=0.5, reason="r"),
+        Signal(date=idx[0].strftime("%Y-%m-%d"), symbol="NOPE", strategy="s", direction="buy",
+               price=1.0, strength=0.5, reason="r"),
+    ]
+    fwd = signal_forward_returns(signals, {"TEST": df}, horizons=(5,))
+    assert len(fwd) == 1 and fwd.attrs["skipped_no_data"] == 2
+    assert fwd.iloc[0]["price_now"] == 110.0            # 原始收盘价
+    assert fwd.iloc[0]["ret_now"] == pytest.approx(0.10)  # 复权价算收益
