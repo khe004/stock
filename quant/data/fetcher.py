@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
+import numpy as np
 import pandas as pd
 import yfinance as yf
 
@@ -68,15 +69,46 @@ def fetch_history(symbol: str, start: str) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+# 重叠日复权比例 (adj_close/close) 的相对变化超过此值 → 期间有新分红，需全量重拉。
+# 最小的季度分红（成长 ETF）约 0.1%，浮点噪音在 1e-6 量级。
+ADJ_DRIFT_TOL = 2e-4
+# 重叠日原始收盘价变化超过此倍数（对数）→ 拆股/合股（yfinance 会回溯调整 Close）。
+SPLIT_LOG_TOL = 0.2
+
+
+def needs_full_refresh(stored: pd.Series, fetched: pd.Series) -> str | None:
+    """比较库内与新拉取数据在重叠日的复权口径，判断增量拼接是否会错位；不需要返回 None。
+
+    yfinance 的 adj_close 以下载日为基准回溯复权：每次分红后，**全部历史行**的复权价都会
+    整体下移。增量更新只追加新行，旧行还停在上次下载时的口径 → 分红在总回报序列里消失
+    （2026-10-14 发现：6 月底以来没全量重拉，BIL 近 3.5 个月总回报从 +1.03% 变成 +0.13%，
+    债券 ETF 的 12-1 动量偏低 0.5~1.1 个百分点）。拆股则连原始 close 都会被回溯调整。
+    """
+    try:
+        s_close, s_adj = float(stored["close"]), float(stored["adj_close"])
+        f_close, f_adj = float(fetched["close"]), float(fetched["adj_close"])
+    except (TypeError, ValueError, KeyError):
+        return None
+    if min(s_close, s_adj, f_close, f_adj) <= 0 or any(pd.isna(v) for v in (s_close, s_adj, f_close, f_adj)):
+        return None
+    if abs(np.log(f_close / s_close)) > SPLIT_LOG_TOL:
+        return f"重叠日收盘价 {s_close:.4g}→{f_close:.4g}，疑似拆股/合股"
+    drift = (f_adj / f_close) / (s_adj / s_close) - 1
+    if abs(drift) > ADJ_DRIFT_TOL:
+        return f"重叠日复权比例变化 {drift:+.3%}，期间有新分红"
+    return None
+
+
 def update_symbol(conn, symbol: str, history_start: str, full: bool = False) -> int:
     """增量更新单个标的，返回写入行数。
 
-    full=True 时忽略库内进度、从 history_start 全量重拉并覆盖：yfinance 的
-    adj_close 以下载日为基准回溯复权，分红后历史行会整体变化，增量拼接会在
-    衔接点留下微小错位，建议每季度全量刷新一次。
+    full=True 时忽略库内进度、从 history_start 全量重拉并覆盖。增量模式下会比对重叠日的
+    复权口径（见 ``needs_full_refresh``），发现新分红或拆股就自动对该标的全量重拉，
+    不再依赖"每季度手动全量刷新"。
 
     增量起点是库内最新日期"本身"而非其后一天：盘中运行会存下当日的半根K线，
-    从最新日期重拉可保证下次运行将其覆盖为收盘定稿（REPLACE 幂等）。"""
+    从最新日期重拉可保证下次运行将其覆盖为收盘定稿（REPLACE 幂等）；这一行同时
+    是判断复权口径是否变化的重叠日。"""
     latest = None if full else store.latest_price_date(conn, symbol)
     start = latest if latest else history_start
     df = fetch_history(symbol, start)
@@ -85,6 +117,17 @@ def update_symbol(conn, symbol: str, history_start: str, full: bool = False) -> 
             # yfinance 拉取失败时常静默返回空表；首拉/全量拿到空必属异常
             raise RuntimeError(f"{symbol}: 拉取返回空数据（网络受限或代码无效？）")
         return 0
+    if latest is not None:
+        overlap = pd.Timestamp(latest)
+        stored = store.load_prices(conn, symbol, start=latest)
+        if overlap in df.index and overlap in stored.index:
+            reason = needs_full_refresh(stored.loc[overlap], df.loc[overlap])
+            if reason:
+                log.info("%s %s，全量重拉以重算复权价", symbol, reason)
+                full_df = fetch_history(symbol, history_start)
+                if not full_df.empty:
+                    return store.upsert_prices(conn, symbol, full_df)
+                log.warning("%s 全量重拉返回空表，本次仅增量写入，下次运行会再检测", symbol)
     return store.upsert_prices(conn, symbol, df)
 
 

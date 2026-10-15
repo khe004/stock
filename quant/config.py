@@ -124,6 +124,12 @@ class Config:
         return list(mp.get("strategies", [])) + list(mp.get("hold_assets", []))
 
     @property
+    def model_portfolio_adopted(self) -> str | None:
+        """当前模型组合配方的采纳日（YYYY-MM-DD）；此后才算样本外。未配置返回 None。"""
+        value = self.raw.get("model_portfolio", {}).get("adopted")
+        return str(value) if value else None
+
+    @property
     def model_portfolio_hold_assets(self) -> list[str]:
         """模型组合里的买入持有成分（ETF 代码），需在相关性页把它们的日收益率
         作为独立列接进 returns_df 才能被组合识别。"""

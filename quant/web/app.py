@@ -302,10 +302,12 @@ def render_signal_history():
         strategy=None if f_strategy == "全部" else f_strategy,
         symbol=None if f_symbol == "全部" else f_symbol,
     )
-    st.caption(f"共 {len(df)} 条信号")
+    st.caption(f"共 {len(df)} 条信号。「来源」：**当日运行**是平台在信号日当天真实发出的（样本外记录）；"
+               "补跑与历史补录是事后用当时的规则和数据重算的；**未知**是 2026-10-14 开始记录来源之前入库的。")
     if df.empty:
         st.info("暂无信号")
         return
+    df["source"] = df["source"].map(store.SIGNAL_SOURCES).fillna("未知")
 
     def row_style(row):
         bg = BUY_BG if row["direction"] == BUY else SELL_BG
@@ -898,6 +900,54 @@ def _render_leverage(combo_daily: pd.Series, combo_m: dict) -> None:
             )
 
 
+def _render_since_adoption(aligned: pd.DataFrame) -> None:
+    """当前配方自采纳日以来的表现——平台上唯一真正的样本外数字，不随页面区间与勾选变化。"""
+    adopted = cfg.model_portfolio_adopted
+    recipe = cfg.model_portfolio
+    if not adopted or not recipe:
+        return
+    rets = pd.DataFrame(index=aligned.index)
+    for c in recipe:
+        if c in aligned.columns:
+            rets[c] = aligned[c]
+        else:  # 买入持有成分
+            hdf = store.load_prices(conn, c)
+            if not hdf.empty:
+                rets[c] = price_series(hdf).pct_change(fill_method=None).reindex(rets.index)
+    bench = {}
+    for b in ("SPY", "QQQ", "IEF"):
+        bdf = store.load_prices(conn, b)
+        if not bdf.empty:
+            bench[b] = price_series(bdf).pct_change(fill_method=None)
+    window = rets.loc[rets.index > pd.Timestamp(adopted)]
+    legs = [c for c in recipe if c in window.columns]
+    st.markdown(f"#### 📆 当前配方采纳以来（样本外，自 {adopted}）")
+    if len(legs) < len(recipe) or window[legs].dropna().shape[0] < 2:
+        st.caption("采纳以来数据不足或有成分缺行情，暂不计算。")
+        return
+    sub = window[legs].dropna()
+    eq, m = monthly_rebalanced_portfolio(sub, INITIAL_CASH, cfg.cost_bps)
+    rows = {"🧺 模型组合（月度再平衡）": m}
+    for c in legs:
+        rows[c] = equity_metrics(INITIAL_CASH * (1 + sub[c]).cumprod(), INITIAL_CASH)
+    for b, r in bench.items():
+        r = r.reindex(sub.index).fillna(0.0)
+        rows[f"{b} 长持"] = equity_metrics(INITIAL_CASH * (1 + r).cumprod(), INITIAL_CASH)
+    if "SPY" in bench and "IEF" in bench:
+        mix = 0.6 * bench["SPY"].reindex(sub.index).fillna(0.0) + 0.4 * bench["IEF"].reindex(sub.index).fillna(0.0)
+        rows["60/40（SPY/IEF，每日再平衡）"] = equity_metrics(INITIAL_CASH * (1 + mix).cumprod(), INITIAL_CASH)
+    table = pd.DataFrame(rows).T.rename(columns=RISK_COLS)[["总收益", "最大回撤", "年化波动"]]
+    st.dataframe(table.style.format({"总收益": "{:+.1%}", "最大回撤": "{:.1%}", "年化波动": "{:.1%}"}),
+                 width="stretch")
+    st.caption(
+        f"区间 {sub.index[0]:%Y-%m-%d} ~ {sub.index[-1]:%Y-%m-%d}，共 {len(sub)} 个交易日。"
+        "这是配方定下之后才发生的行情，没有被挑选过，是平台上**唯一的样本外数字**——上面回测里的一切都"
+        "经过了事后选择。但几个月的样本**不足以判断好坏**（一年也不够，回测里单策略跑输一两年是常态），"
+        "这里的意义是从现在起持续积累。不年化、不报夏普，正是因为区间太短。"
+        "改配方要同时改 `config.yaml` 的 `model_portfolio.adopted`，样本外记录从新日期重新开始。"
+    )
+
+
 def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
     """模型组合（Model Portfolio）：自选几个低相关策略等权，对比单策略与长持基准。
 
@@ -930,6 +980,8 @@ def _render_model_portfolio(aligned: pd.DataFrame, corr: pd.DataFrame) -> None:
             "这些结论**不能套到含 DBMF 的当前默认配方上**：DBMF 2019-05 才上市，含它的组合只能在"
             "更短的共同窗口里算。canary_mom 虽已开启推送，仍无样本外记录。"
         )
+
+    _render_since_adoption(aligned)
 
     # 买入持有型成分（如管理期货 DBMF）：不是策略、没有信号，作为独立收益腿并进来。
     # 只在本小节的局部 frame `ext` 里生效，不碰页面全局 aligned（否则 DBMF 的短历史

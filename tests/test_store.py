@@ -111,3 +111,21 @@ def test_notification_deliveries_are_idempotent_per_channel():
     assert store.delivered_signal_ids(conn, [signal_id], "email") == set()
     count = conn.execute("SELECT COUNT(*) FROM notification_deliveries").fetchone()[0]
     assert count == 1
+
+
+def test_signal_source_recorded_and_old_db_gets_column(tmp_path):
+    import sqlite3
+    db = tmp_path / "old.db"
+    raw = sqlite3.connect(db)
+    raw.executescript("""CREATE TABLE signals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, symbol TEXT NOT NULL,
+        strategy TEXT NOT NULL, direction TEXT NOT NULL, price REAL, strength REAL, reason TEXT,
+        created_at TEXT NOT NULL, notified_at TEXT, UNIQUE (date, symbol, strategy, direction));
+        INSERT INTO signals (date, symbol, strategy, direction, created_at)
+        VALUES ('2026-09-01', 'SPY', 'smart_dca', 'buy', 'x');""")
+    raw.commit(); raw.close()
+    conn = store.connect(db)
+    assert store.insert_signals(conn, [sig(symbol="QQQ")], source="daily") == 1
+    df = store.load_signals(conn).set_index("symbol")
+    assert df.at["QQQ", "source"] == "daily"
+    assert pd.isna(df.at["SPY", "source"])          # 旧行保留、来源未知，不重建表

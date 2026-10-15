@@ -450,6 +450,9 @@ def test_config_model_portfolio_is_explicit_and_consistent():
     assert mp, "config 应显式配置 model_portfolio"
     assert len(set(mp)) == len(mp), "推荐配方有重复成分"
     assert len(mp) >= 2, "组合至少要 2 个成分才谈得上分散"
+    import datetime as _dt
+    adopted = cfg.model_portfolio_adopted
+    assert adopted and _dt.date.fromisoformat(adopted) <= _dt.date.today(), "配方须写明已发生的采纳日"
 
     hold = set(cfg.model_portfolio_hold_assets)
     strat_names = [s for s in mp if s not in hold]         # 策略成分 = 全部减去买入持有

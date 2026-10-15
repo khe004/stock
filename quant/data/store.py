@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS signals (
     reason      TEXT,
     created_at  TEXT NOT NULL,
     notified_at TEXT,
+    source      TEXT,
     UNIQUE (date, symbol, strategy, direction)
 );
 """
@@ -290,6 +291,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(SCHEMA)
         log.warning("signals 表结构过旧，已重建（旧表保留为 signals_legacy）；"
                     "历史信号可用 run_daily.py --date 补跑重算")
+    if "source" not in _table_cols(conn, "signals"):
+        # 信号来源（2026-10-14 起记录）：只补列不重建，旧行留空 = 来源未知
+        conn.execute("ALTER TABLE signals ADD COLUMN source TEXT")
     # fundamentals 表：数据宝贵不 DROP，只补缺列
     if "fundamentals" not in {row[0] for row in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}:
@@ -653,16 +657,23 @@ def load_prices(conn: sqlite3.Connection, symbol: str, start: str | None = None)
     return df
 
 
-def insert_signals(conn: sqlite3.Connection, signals: list[Signal]) -> int:
-    """写入信号，(date, symbol, strategy, direction) 已存在则忽略。返回新插入条数。"""
+SIGNAL_SOURCES = {"daily": "当日运行", "rerun": "补跑（--date）", "backfill": "历史补录"}
+
+
+def insert_signals(conn: sqlite3.Connection, signals: list[Signal], source: str | None = None) -> int:
+    """写入信号，(date, symbol, strategy, direction) 已存在则忽略。返回新插入条数。
+
+    ``source`` 记录这条信号是怎么进库的（见 SIGNAL_SOURCES）：只有「当日运行」是平台在信号日
+    当天真实发出的，才算样本外记录；补跑与补录是事后用今天的规则和数据重算的。
+    """
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     new = 0
     for s in signals:
         cur = conn.execute(
             """INSERT OR IGNORE INTO signals
-               (date, symbol, strategy, direction, price, strength, reason, created_at)
-               VALUES (?,?,?,?,?,?,?,?)""",
-            (s.date, s.symbol, s.strategy, s.direction, s.price, s.strength, s.reason, now),
+               (date, symbol, strategy, direction, price, strength, reason, created_at, source)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (s.date, s.symbol, s.strategy, s.direction, s.price, s.strength, s.reason, now, source),
         )
         new += cur.rowcount
     conn.commit()
@@ -741,7 +752,8 @@ def load_signals(
     symbol: str | None = None,
     start: str | None = None,
 ) -> pd.DataFrame:
-    query = "SELECT date, symbol, strategy, direction, price, strength, reason, notified_at FROM signals WHERE 1=1"
+    query = ("SELECT date, symbol, strategy, direction, price, strength, reason, notified_at, source "
+             "FROM signals WHERE 1=1")
     params: list = []
     if strategy:
         query += " AND strategy = ?"

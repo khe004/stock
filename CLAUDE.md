@@ -9,7 +9,7 @@ Telegram + 邮件推送信号，Streamlit 面板复盘。与用户沟通用中�
 python -m pytest tests/ -q                # 单测（全绿是提交底线）
 python run_daily.py --no-fetch --no-notify  # 离线跑流水线（容器内用这个）
 python run_daily.py --date 2026-07-03     # 补跑某日信号（幂等）
-python run_daily.py --full-refresh        # 全量重拉行情（复权价拼接错位，季度一次）
+python run_daily.py --full-refresh        # 全量重拉行情（增量更新已能自动发现新分红/拆股并重拉该标的，一般不必手动跑）
 python run_daily.py --backfill             # 补全量历史信号入库（标记已通知不推送）
 python run_daily.py --research-only        # 只刷新基本面与 AI 基建财报，不跑策略/通知
 python run_daily.py --no-options           # 跳过期权链快照采集（默认联网运行时自动采集）
@@ -20,7 +20,9 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 
 - `run_daily.py`：主入口。拉数据 → 各策略 generate → 信号入库（唯一约束幂等）→ dispatch 推送
 - `quant/config.py`：config.yaml + .env；`update_symbols` = watchlist + 各策略 universe_file
-- `quant/data/`：yfinance 增量拉取（首拉空表报错）、SQLite；季度三表按 snapshot + facts
+- `quant/data/`：yfinance 增量拉取（首拉空表报错；比对重叠日复权比例，发现新分红/拆股自动全量重拉该标的——
+  否则分红会从总回报序列里消失，2026-10-14 曾因此让 BIL 3.5 个月总回报从 +1.03% 变成 +0.13%）、SQLite；
+  signals 表的 `source` 列记录来源（当日运行/补跑/历史补录，2026-10-14 前的行为空=未知）；季度三表按 snapshot + facts
   保存来源/币种/抓取时间与历史版本，最新快照缺失值不从旧版拼接；
   `option_snapshots`/`option_quotes` 存每日期权链快照（见下「卖 put 研究」）
 - `quant/strategies/`：基类 `generate(prices: dict[symbol, df]) -> list[Signal]`，对**全量历史**出信号；
@@ -190,6 +192,8 @@ aggressive_mom 改持 BIL（1-3月短债 ETF，近零波动零久期，2007+ 全
 
 - **路线与优先级以 `PLAN_NEXT.md` 第 12 节为准**。2026-10-07 已完成：运行健康自检、口径修正 Q01–Q07、
   「现在该持有什么」视图；剩余为体验增强候选（M/S/E/X 系列）与几个遗留小项。日报里出现 ⚠️ 先看「🩺 运行状态」段。
+- **样本外记录**：`config.yaml` 的 `model_portfolio.adopted` 是当前配方采纳日，相关性页「📆 采纳以来」只算此后的表现；
+  **改配方必须同步改这个日期**。信号历史里只有来源为「当日运行」的才是真实发出的信号。
 - **口径修正留下的两条规矩**：(a) 池子等权基准是真正的月度再平衡 + 换手成本（旧口径把 stock_momentum 的
   池子等权虚高约 50 个百分点）；(b) 模型组合表里的数字是「每日再平衡、零成本」的理论值，引用时同时看页面上的
   月度再平衡可执行口径对照。

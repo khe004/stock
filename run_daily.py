@@ -329,7 +329,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info("%s: %d 条%s信号", name, len(sigs), "历史" if args.backfill else "当日")
         all_new.extend(sigs)
 
-    inserted = store.insert_signals(conn, all_new)
+    source = "backfill" if args.backfill else ("rerun" if args.date else "daily")
+    inserted = store.insert_signals(conn, all_new, source=source)
     log.info("新入库信号 %d 条（重复 %d 条已忽略）", inserted, len(all_new) - inserted)
 
     if args.backfill:
