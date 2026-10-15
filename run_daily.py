@@ -23,7 +23,7 @@ from quant.analysis.quarterly_validation import (
 from quant.analysis.research_digest import build_research_digest
 from quant.config import ROOT, load_config
 from quant.data import fetcher, store
-from quant.notify import email, telegram
+from quant.notify import email, telegram, wechat
 from quant.strategies.base import BUY
 
 log = logging.getLogger("run_daily")
@@ -79,6 +79,8 @@ def dispatch(cfg, subject: str, text: str) -> bool:
         ok = telegram.send_message(text) and ok
     if cfg.email_enabled:
         ok = email.send_email(subject, text) and ok
+    if cfg.wechat_enabled:
+        ok = wechat.send_message(subject, text) and ok
     return ok
 
 
@@ -87,6 +89,8 @@ def send_channel(channel: str, subject: str, text: str) -> bool:
         return telegram.send_message(text)
     if channel == "email":
         return email.send_email(subject, text)
+    if channel == "wechat":
+        return wechat.send_message(subject, text)
     raise ValueError(f"未知通知渠道: {channel}")
 
 
@@ -148,7 +152,8 @@ def _strategy_symbols(cfg, params: dict) -> list[str]:
     if params.get("universe_file"):
         symbols += [s for s in cfg.universe_symbols(params["universe_file"])
                     if s not in symbols]
-    return symbols
+    retired = cfg.retired_symbols   # 已停更的不再拉取，每日运行也不再喂给策略
+    return [s for s in symbols if s not in retired]
 
 
 def latest_signal_date(prices: dict, strategy_symbols: list[str]) -> str:
@@ -356,7 +361,8 @@ def main(argv: list[str] | None = None) -> int:
             health.render(), holdings_text, build_market_overview(prices, cfg)) if x)
         flag = "" if health.ok else "⚠️ "
         channels = (["telegram"] if cfg.telegram_enabled else []) + (
-            ["email"] if cfg.email_enabled else [])
+            ["email"] if cfg.email_enabled else []) + (
+            ["wechat"] if cfg.wechat_enabled else [])
         if notify_rows:
             signal_ids = [int(r["id"]) for r in notify_rows]
             if not channels:

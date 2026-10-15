@@ -326,4 +326,15 @@ quarterly_research:
 notify:
   telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
   email: true           # 需在 .env 配置 SMTP_HOST / SMTP_USER / SMTP_PASSWORD / EMAIL_TO
+  wechat: true          # 微信（Server酱）：需在 .env 配置 SERVERCHAN_SENDKEY，未配置则不启用
   research_digest: false # AI 研究摘要独立开关；默认关闭，与交易信号通知分离
+
+# 已停更的代码（退市/被并购/改代码）：不再每天拉取、不再喂给每日运行的策略；
+# 历史行情留在库里、回测照常使用（从名单里删掉会加重幸存者偏差）。
+# 健康自检报「选股池个股超过 7 天无行情」时，核实后加到这里。
+retired_symbols:          # 2026-10-14 加入；最后行情日见注释
+  - EA                    # 2026-08-10
+  - EQR                   # 2026-08-21
+  - AVB                   # 2026-08-24
+  - QRVO                  # 2026-10-05
+  - WBD                   # 2026-10-06

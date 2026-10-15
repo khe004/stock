@@ -99,6 +99,20 @@ class Config:
         return bool(self.raw.get("notify", {}).get("telegram", False))
 
     @property
+    def wechat_enabled(self) -> bool:
+        """微信（Server酱）：config 打开且 .env 配了 SERVERCHAN_SENDKEY 才启用。"""
+        return bool(self.raw.get("notify", {}).get("wechat", False)) and bool(
+            os.getenv("SERVERCHAN_SENDKEY", "").strip())
+
+    @property
+    def retired_symbols(self) -> set[str]:
+        """已确认停更（退市/被并购）的代码：不再每天拉取、不喂给每日运行的策略。
+
+        历史行情保留在库里、回测照常使用——从名单删掉会加重幸存者偏差。
+        """
+        return {str(s) for s in self.raw.get("retired_symbols", []) or []}
+
+    @property
     def email_enabled(self) -> bool:
         return bool(self.raw.get("notify", {}).get("email", False))
 
@@ -155,7 +169,8 @@ class Config:
             if params.get("universe_file"):
                 for s in self.universe_symbols(params["universe_file"]):
                     seen.setdefault(s)
-        return list(seen)
+        retired = self.retired_symbols
+        return [s for s in seen if s not in retired]
 
 
 def load_config(path: Path | None = None) -> Config:

@@ -101,3 +101,58 @@ def test_missing_recipient_is_noop(monkeypatch):
     FakeSMTP.instances.clear()
     assert send_email("s", "t") is True
     assert FakeSMTP.instances == []
+
+
+def test_wechat_api_url_supports_both_key_formats():
+    from quant.notify import wechat
+    assert wechat.api_url("sctp12345tABCDEF") == "https://12345.push.ft07.com/send/sctp12345tABCDEF.send"
+    assert wechat.api_url("SCT999XYZ") == "https://sctapi.ftqq.com/SCT999XYZ.send"
+
+
+def test_wechat_markdown_keeps_line_breaks_and_title_is_truncated(monkeypatch):
+    from quant.notify import wechat
+    sent = {}
+
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"code": 0}
+
+    def fake_post(url, data, timeout):
+        sent.update(data); return Resp()
+
+    monkeypatch.setenv("SERVERCHAN_SENDKEY", "SCTkey")
+    monkeypatch.setattr(wechat.requests, "post", fake_post)
+    assert wechat.send_message("标" * 40, "第一行\n第二行\n\n第三行")
+    assert len(sent["title"]) == 32 and sent["title"].endswith("…")
+    assert sent["desp"] == "第一行  \n第二行  \n\n第三行  "
+
+
+def test_wechat_business_error_is_not_delivered(monkeypatch):
+    from quant.notify import wechat
+
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"code": 40001, "message": "bad key"}
+
+    monkeypatch.setenv("SERVERCHAN_SENDKEY", "SCTkey")
+    monkeypatch.setattr(wechat.requests, "post", lambda *a, **k: Resp())
+    assert wechat.send_message("t", "x") is False
+
+
+def test_wechat_channel_needs_both_config_and_key(monkeypatch):
+    from quant.config import load_config
+    monkeypatch.setenv("SERVERCHAN_SENDKEY", "")
+    assert not load_config().wechat_enabled
+
+
+def test_retired_symbols_skip_fetch_but_stay_out_of_strategies():
+    import run_daily
+    from quant.config import load_config
+    cfg = load_config()
+    retired = cfg.retired_symbols
+    assert {"EA", "EQR"} <= retired
+    assert not retired & set(cfg.update_symbols)
+    fed = {s for _, p in cfg.enabled_strategies() for s in run_daily._strategy_symbols(cfg, p)}
+    assert not retired & fed
+    # 名单文件不删：回测仍可用它们的历史
+    assert "EA" in cfg.universe_symbols("universe_sp500.yaml")
