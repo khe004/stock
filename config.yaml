@@ -324,7 +324,7 @@ quarterly_research:
   symbols: [NVDA, MU, VRT, MSFT, DLR, TSM, 005930.KS, ARM]
 
 notify:
-  telegram: true        # 需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
+  telegram: false       # 2026-10-14 关闭（改用微信）；启用需在 .env 配置 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID
   email: true           # 需在 .env 配置 SMTP_HOST / SMTP_USER / SMTP_PASSWORD / EMAIL_TO
   wechat: true          # 微信（Server酱）：需在 .env 配置 SERVERCHAN_SENDKEY，未配置则不启用
   research_digest: false # AI 研究摘要独立开关；默认关闭，与交易信号通知分离
