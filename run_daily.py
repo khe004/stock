@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from quant import strategies
+from quant.analysis.alerts import pending_drawdown_alerts, render_alerts, subject_tag
 from quant.analysis.health import check_health
 from quant.analysis.holdings import holdings_report
 from quant.analysis.quarterly_validation import (
@@ -362,11 +363,20 @@ def main(argv: list[str] | None = None) -> int:
             store.mark_notified(conn, [r["id"] for r in observe_rows])
             log.info("仅观察策略 %d 条信号已入库不推送", len(observe_rows))
 
+        # 回撤档位提醒：只在当日运行里发（补跑/历史补录不发），发出去才记账
+        dd_alerts = []
+        if not args.date:
+            for sym, levels in cfg.drawdown_alerts.items():
+                if sym in prices:
+                    dd_alerts += pending_drawdown_alerts(
+                        sym, prices[sym], levels, store.sent_alert_keys(conn, f"{sym}:"))
+        alerts_text = render_alerts(dd_alerts)
         holdings_text = holdings_report(full_signals, cfg.model_portfolio,
                                         cfg.model_portfolio_hold_assets, as_of)
         overview = "\n\n".join(x for x in (
-            health.render(), holdings_text, build_market_overview(prices, cfg)) if x)
-        flag = "" if health.ok else "⚠️ "
+            alerts_text, health.render(), holdings_text, build_market_overview(prices, cfg)) if x)
+        flag = ("" if health.ok else "⚠️ ") + subject_tag(dd_alerts)
+        any_sent = False
         channels = (["telegram"] if cfg.telegram_enabled else []) + (
             ["email"] if cfg.email_enabled else []) + (
             ["wechat"] if cfg.wechat_enabled else [])
@@ -385,6 +395,7 @@ def main(argv: list[str] | None = None) -> int:
                     body = format_message(channel_rows) + "\n\n" + overview
                     subject = f"{flag}📈 投资日报 {as_of}（{len(channel_rows)} 条信号）"
                     if send_channel(channel, subject, body):
+                        any_sent = True
                         store.mark_channel_delivered(
                             conn, [int(r["id"]) for r in channel_rows], channel)
                     else:
@@ -400,7 +411,11 @@ def main(argv: list[str] | None = None) -> int:
             body = f"📭 今日无新信号（{as_of}）\n\n" + overview
             subject = f"{flag}📊 投资日报 {as_of}（市场概览）"
             ok = dispatch(cfg, subject, body)
+            any_sent = any_sent or ok
             log.info("无信号日报发送%s", "成功" if ok else "失败")
+        if dd_alerts and (any_sent or not channels):
+            store.record_alerts(conn, dd_alerts, as_of)
+            log.info("回撤提醒已发出：%s", ", ".join(a.key for a in dd_alerts))
 
         if cfg.research_digest_enabled:
             digest_body, digest_hash = build_research_digest(conn)

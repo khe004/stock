@@ -104,6 +104,12 @@ class Config:
         return self._option_window("options_leaps", 365, 1200, (0.30, 1.00))
 
     @property
+    def drawdown_alerts(self) -> dict[str, list[float]]:
+        """回撤档位提醒：{标的: [档位%...]}，离历史高点跌到该档时日报提醒一次。"""
+        raw = self.raw.get("drawdown_alerts", {}) or {}
+        return {str(s): sorted(float(x) for x in lv) for s, lv in raw.items() if lv}
+
+    @property
     def telegram_enabled(self) -> bool:
         return bool(self.raw.get("notify", {}).get("telegram", False))
 

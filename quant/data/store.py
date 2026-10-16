@@ -216,6 +216,16 @@ CREATE TABLE IF NOT EXISTS research_digest_deliveries (
 );
 """
 
+# 日报提醒的发送记录：key 唯一，发过就不再发（回撤档位提醒按"段起点高点日 + 档位"成 key）
+SCHEMA_ALERTS = """
+CREATE TABLE IF NOT EXISTS alert_log (
+    key      TEXT PRIMARY KEY,
+    as_of    TEXT NOT NULL,
+    message  TEXT,
+    sent_at  TEXT NOT NULL
+);
+"""
+
 # 期权链每日快照（个股/指数 CSP 前向数据集）。yfinance 只给"当天"的链、没有历史，
 # 所以要回测个股卖 put 只能从今天起自己攒——这两张表就是那份 point-in-time 数据。
 # snapshot_date = 该标的库内最新行情日（报价对应的交易日），captured_at = 实际抓取时刻。
@@ -341,8 +351,24 @@ def connect(db_path: Path | str) -> sqlite3.Connection:
     conn.executescript(SCHEMA_RESEARCH_RECORDS)
     conn.executescript(SCHEMA_NOTIFICATION_DELIVERIES)
     conn.executescript(SCHEMA_OPTIONS)
+    conn.executescript(SCHEMA_ALERTS)
     _migrate(conn)
     return conn
+
+
+# ---------- 日报提醒去重（回撤档位等）----------
+
+def sent_alert_keys(conn: sqlite3.Connection, prefix: str = "") -> set[str]:
+    rows = conn.execute("SELECT key FROM alert_log WHERE key LIKE ?", (prefix + "%",)).fetchall()
+    return {r["key"] for r in rows}
+
+
+def record_alerts(conn: sqlite3.Connection, alerts: list, as_of: str) -> None:
+    """记下已随日报送达的提醒（alerts 为带 key/text 的对象）。"""
+    sent_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    conn.executemany("INSERT OR IGNORE INTO alert_log VALUES (?,?,?,?)",
+                     [(a.key, as_of, a.text, sent_at) for a in alerts])
+    conn.commit()
 
 
 def save_research_note(conn: sqlite3.Connection, symbol: str, status: str,
