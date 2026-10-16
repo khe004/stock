@@ -287,18 +287,25 @@ def main(argv: list[str] | None = None) -> int:
             log.error("季度三表抓取整体异常，不影响信号主流程", exc_info=True)
 
     # ── 期权链快照（个股/指数 CSP 前向数据集，只采集不出信号）──
-    opt = cfg.options_research
+    # 两档：近月（options_research）与远期 >1 年（options_leaps），存同一张表、按到期窗口区分
     options_result: tuple[int, list[str]] | None = None
-    if not args.no_fetch and not args.no_options and opt["enabled"] and opt["symbols"]:
-        try:
-            log.info("采集 %d 个标的期权链快照…", len(opt["symbols"]))
-            opt_ok, opt_fail = fetcher.update_option_snapshots(
-                conn, opt["symbols"], opt["min_dte"], opt["max_dte"], opt["moneyness"])
-            log.info("期权快照完成：成功 %d，失败 %d", opt_ok, len(opt_fail))
-            options_result = (opt_ok, list(opt_fail))
-        except Exception:  # noqa: BLE001
-            log.error("期权快照整体异常，不影响信号主流程", exc_info=True)
-            options_result = (0, list(opt["symbols"]))
+    windows = [(label, w) for label, w in (("", cfg.options_research), ("远期", cfg.options_leaps))
+               if w["enabled"] and w["symbols"]]
+    if not args.no_fetch and not args.no_options and windows:
+        opt_ok, opt_fail = 0, []
+        for label, opt in windows:
+            tag = f"{label} " if label else ""
+            try:
+                log.info("采集 %d 个标的%s期权链快照…", len(opt["symbols"]), tag)
+                ok, fail = fetcher.update_option_snapshots(
+                    conn, opt["symbols"], opt["min_dte"], opt["max_dte"], opt["moneyness"])
+                log.info("%s期权快照完成：成功 %d，失败 %d", tag, ok, len(fail))
+            except Exception:  # noqa: BLE001
+                log.error("%s期权快照整体异常，不影响信号主流程", tag, exc_info=True)
+                ok, fail = 0, list(opt["symbols"])
+            opt_ok += ok
+            opt_fail += [f"{s}({label})" if label else s for s in fail]
+        options_result = (opt_ok, opt_fail)
 
     prices = {s: store.load_prices(conn, s) for s in cfg.update_symbols}
     prices = {s: df for s, df in prices.items() if not df.empty}

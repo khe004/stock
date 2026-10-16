@@ -4025,13 +4025,104 @@ def _render_option_snapshots():
                "至少攒满 1~2 年、覆盖一次 ≥10% 回撤后再下结论。")
 
 
+def _render_leaps_puts():
+    from quant.analysis.option_forward import (annotate_quotes, historical_put_outcome,
+                                               leaps_grid, leaps_metrics)
+
+    opt = cfg.options_leaps
+    st.caption(
+        "观测 **一年以上到期、行权价低于现价** 的 put（`config.yaml` 的 `options_leaps`，"
+        f"{', '.join(opt['symbols'])}），2026-10-15 起每天随 `run_daily` 存一份。"
+        "问题是：**愿意在跌 X% 之后接货，提前一两年能收多少钱，这个价钱相对它自己的历史贵不贵**。"
+        "只观测、不出信号。")
+    q = store.load_option_quotes(conn, symbols=opt["symbols"], min_dte=opt["min_dte"])
+    leaps = leaps_metrics(annotate_quotes(q), opt["min_dte"]) if not q.empty else q
+    if leaps.empty:
+        st.info("还没有远期 put 快照，下次 `python run_daily.py` 联网运行时开始采集。")
+        return
+    latest = leaps["snapshot_date"].max()
+    cur = leaps[leaps["snapshot_date"] == latest]
+    # 默认到期日：覆盖标的最多的里面最早的那个，便于横向比较
+    cover = cur.groupby("expiration")["symbol"].nunique()
+    exps = sorted(cover.index)
+    default = min(e for e in exps if cover[e] == cover.max())
+    c1, c2 = st.columns([1, 2])
+    exp = c1.selectbox("到期日", exps, index=exps.index(default),
+                       format_func=lambda e: f"{e}（{cover[e]} 个标的）", key="leaps_exp")
+    c2.markdown(f"**快照 {latest}** · 每个标的在下跌缓冲 20% / 30% / 40% / 50% 附近各取一张")
+    grid = leaps_grid(cur, exp)
+    if grid.empty:
+        st.info("该到期日没有买价 > 0 的合约")
+        return
+    rows = []
+    for _, r in grid.iterrows():
+        h = historical_put_outcome(store.load_prices(conn, r["symbol"])["close"], int(r["dte"]),
+                                   r["strike"] / r["spot"], r["bid"] / r["spot"])
+        rows.append({
+            "标的": r["symbol"], "现价": r["spot"], "行权价": r["strike"], "下跌缓冲": r["buffer"],
+            "买价": r["bid"], "价差": r["spread"], "IV": r["iv"], "Δ": r["delta"],
+            "权利金率": r["prem_yield"], "年化": r["ann_yield"], "盈亏平衡跌幅": r["be_buffer"],
+            "未平仓": r["open_interest"],
+            "权利金/现价": r["bid"] / r["spot"], "历史平均赔付": h["payout"],
+            "历史跌破平衡": h["breach"], "独立窗口": h["windows"]})
+    show = pd.DataFrame(rows)
+    st.dataframe(show.style.format({
+        "现价": "{:.2f}", "行权价": "{:.2f}", "下跌缓冲": "{:.0%}", "买价": "{:.2f}",
+        "价差": "{:.0%}", "IV": "{:.0%}", "Δ": "{:.2f}", "权利金率": "{:.1%}", "年化": "{:.1%}",
+        "盈亏平衡跌幅": "{:.0%}", "未平仓": "{:,.0f}", "权利金/现价": "{:.1%}",
+        "历史平均赔付": "{:.1%}", "历史跌破平衡": "{:.0%}", "独立窗口": "{:.1f}"}, na_rep="—"),
+        width="stretch", hide_index=True)
+    st.caption(
+        "**怎么读**：权利金率 = 买价/行权价（现金担保的总回报），年化 = ×365/天数；担保金放在 SGOV 时"
+        "利息另算，所以权利金率是**利息之外**的补偿。盈亏平衡跌幅 = 到期要比现价跌超过多少才亏钱。"
+        "「权利金/现价」与「历史平均赔付」可以直接比：前者大于后者，说明按这个标的自己的历史，这份保险收得偏贵。"
+        "历史从 2005 年起（含 2008），起点逐日滑动、窗口高度重叠，**真实样本量是「独立窗口」**；"
+        "不足 3 个的（如 2025 年才重新上市的 SNDK）不给历史数。")
+    st.caption(
+        "⚠️ 诚实边界：(1) 这些标的大多是事后涨得最好的，历史漂移偏高 → 历史赔付**系统性偏低**、卖方显得更划算；"
+        "(2) 远期合约价差大，深虚值的买价常常只是挂单，未必成交得了；(3) 到期前要按市值承受浮亏，"
+        "跌 30% 时 put 的市价可能是收到权利金的好几倍，美式期权还可能被提前指派；"
+        "(4) 一张合约要担保 行权价×100 美元、锁一年多。")
+
+    days = leaps["snapshot_date"].nunique()
+    if days >= 2:
+        st.markdown("**同一张合约的价格变化**（30% 缓冲附近，按首个快照日选定的行权价跟踪）")
+        first = leaps[leaps["snapshot_date"] == leaps["snapshot_date"].min()]
+        g0 = leaps_grid(first, exp, buffers=(0.3,))
+        track = leaps.merge(g0[["symbol", "strike"]], on=["symbol", "strike"])
+        track = track[track["expiration"] == exp]
+        if not track.empty:
+            st.line_chart(track.pivot_table(index="snapshot_date", columns="symbol", values="bid"))
+    else:
+        st.caption(f"已采集 {days} 天；攒够几天后这里会画出同一张合约的买价变化。")
+
+    with st.expander("完整报价（单个标的、全部远期到期日）"):
+        sym = st.selectbox("标的", sorted(cur["symbol"].unique()), key="leaps_sym")
+        full = cur[cur["symbol"] == sym].sort_values(["expiration", "strike"], ascending=[True, False])
+        st.dataframe(full[["expiration", "dte", "strike", "buffer", "bid", "ask", "spread", "iv",
+                           "delta", "prem_yield", "ann_yield", "be_buffer", "open_interest"]]
+                     .rename(columns={"expiration": "到期", "dte": "天数", "strike": "行权价",
+                                      "buffer": "下跌缓冲", "bid": "买价", "ask": "卖价",
+                                      "spread": "价差", "iv": "IV", "delta": "Δ",
+                                      "prem_yield": "权利金率", "ann_yield": "年化",
+                                      "be_buffer": "盈亏平衡跌幅", "open_interest": "未平仓"})
+                     .style.format({"行权价": "{:.2f}", "下跌缓冲": "{:.0%}", "买价": "{:.2f}",
+                                    "卖价": "{:.2f}", "价差": "{:.0%}", "IV": "{:.0%}", "Δ": "{:.2f}",
+                                    "权利金率": "{:.1%}", "年化": "{:.1%}", "盈亏平衡跌幅": "{:.0%}",
+                                    "未平仓": "{:,.0f}"}, na_rep="—"),
+                     width="stretch", hide_index=True)
+
+
 def render_put_research():
     st.subheader("🧾 卖 put 研究（现金担保看跌期权 / VRP）")
-    t1, t2 = st.tabs(["📉 合成 SPY 卖 put（回测）", "🗂️ 个股期权快照（前向数据）"])
+    t1, t2, t3 = st.tabs(["📉 合成 SPY 卖 put（回测）", "🗂️ 个股期权快照（前向数据）",
+                          "🗓️ 远期 put 观测（>1 年）"])
     with t1:
         _render_synthetic_putwrite()
     with t2:
         _render_option_snapshots()
+    with t3:
+        _render_leaps_puts()
 
 
 PAGES = {

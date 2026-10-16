@@ -320,6 +320,15 @@ options_research:
     - CAT
     - UBER
 
+# 远期卖 put 观测（2026-10-15 起，仅研究不出信号）：>1 年到期、行权价低于现价的 put。
+# 与上面的近月快照存在同一张表，按到期窗口区分；同日同标的两档都采（先到为准、互不覆盖）。
+options_leaps:
+  enabled: true
+  min_dte: 365              # 日历天：一年以上
+  max_dte: 1200
+  moneyness: [0.30, 1.00]   # 行权价 / 现价：只看低于现价的（虚值 put）
+  symbols: [QQQ, SMH, NVDA, SNDK, APP, AMD, INTC]
+
 # 阶段 2：季度三表首批跨市场验证样本（不构成投资筛选）
 quarterly_research:
   symbols: [NVDA, MU, VRT, MSFT, DLR, TSM, 005930.KS, ARM]

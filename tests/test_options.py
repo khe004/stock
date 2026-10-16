@@ -7,8 +7,9 @@ import pandas as pd
 import pytest
 
 import quant.data.fetcher as fetcher
-from quant.analysis.option_forward import (annotate_quotes, forward_summary, monthly_first,
-                                           pick_csp, settle_csp)
+from quant.analysis.option_forward import (annotate_quotes, forward_summary,
+                                           historical_put_outcome, leaps_grid, leaps_metrics,
+                                           monthly_first, pick_csp, settle_csp)
 from quant.analysis.putwrite import (beta_matched_blend, bs_put, bs_put_delta, cycle_summary,
                                      regression_beta, simulate_putwrite, strike_for_delta)
 from quant.data import store
@@ -153,6 +154,71 @@ def test_update_option_snapshots_uses_db_date_and_skips_existing(monkeypatch):
     ok2, _ = fetcher.update_option_snapshots(conn, ["AAA"], report=report)
     assert ok2 == 0 and report["AAA"][0] == "skipped"
     assert len(calls) == 1
+
+
+def test_leaps_window_appends_to_existing_snapshot_same_day(monkeypatch):
+    """近月快照已存后，同日同标的再采远期档：追加报价、不覆盖元数据、各窗口独立跳过。"""
+    conn = store.connect(":memory:")
+    idx = pd.bdate_range("2026-10-01", "2026-10-06")
+    store.upsert_prices(conn, "AAA", pd.DataFrame(
+        {"open": 1.0, "high": 1.0, "low": 1.0, "close": 100.0, "adj_close": 100.0,
+         "volume": 1}, index=idx))
+    store.save_option_snapshot(conn, "2026-10-06", "AAA", 100.0, "2026-10-28",
+                               _quotes("2026-11-06"), "first")
+    monkeypatch.setattr(fetcher, "fetch_option_puts",
+                        lambda *a, **kw: (_quotes("2028-01-21"), None))
+    report: dict = {}
+    ok, _ = fetcher.update_option_snapshots(conn, ["AAA"], 365, 1200, report=report)
+    assert ok == 1 and report["AAA"][0] == "updated"
+    snap = store.load_option_snapshots(conn).iloc[0]
+    assert snap["n_quotes"] == 4 and snap["captured_at"] == "first"
+    assert snap["next_earnings"] == "2026-10-28"
+    ok2, _ = fetcher.update_option_snapshots(conn, ["AAA"], 365, 1200, report=report)
+    assert ok2 == 0 and report["AAA"][0] == "skipped"
+    ok3, _ = fetcher.update_option_snapshots(conn, ["AAA"], 7, 60, report=report)
+    assert ok3 == 0 and report["AAA"][0] == "skipped"
+    assert len(store.load_option_quotes(conn, min_dte=365)) == 2
+
+
+def test_leaps_config_symbols_get_price_updates():
+    from quant.config import load_config
+    cfg = load_config()
+    opt = cfg.options_leaps
+    assert opt["symbols"] and opt["min_dte"] >= 365
+    assert opt["moneyness"][1] <= 1.0, "只观测行权价低于现价的 put"
+    missing = [s for s in opt["symbols"] if s not in cfg.update_symbols]
+    assert not missing, f"这些远期期权标的没有日线更新: {missing}"
+
+
+def test_leaps_metrics_and_grid():
+    q = pd.DataFrame({
+        "snapshot_date": ["2026-10-15"] * 4, "symbol": ["AAA"] * 4,
+        "expiration": ["2028-01-21"] * 3 + ["2026-11-20"],
+        "option_type": ["put"] * 4, "strike": [80.0, 70.0, 60.0, 80.0],
+        "bid": [8.0, 5.0, 0.0, 1.0], "ask": [9.0, 6.0, 0.5, 1.2],
+        "iv": [0.4, 0.42, 0.45, 0.4], "spot": [100.0] * 4, "next_earnings": [None] * 4,
+    })
+    m = leaps_metrics(annotate_quotes(q), 365)
+    assert len(m) == 3, "近月合约应被筛掉"
+    r = m[m["strike"] == 80.0].iloc[0]
+    assert r["breakeven"] == 72.0 and r["be_buffer"] == pytest.approx(0.28)
+    assert r["spread"] == pytest.approx(1 / 8.5)
+    g = leaps_grid(m, "2028-01-21", buffers=(0.2, 0.3, 0.4))
+    assert list(g["strike"]) == [80.0, 70.0], "买价为 0 的 60 不入选"
+
+
+def test_historical_put_outcome():
+    idx = pd.date_range("2010-01-01", periods=4000, freq="D")
+    flat = pd.Series(100.0, index=idx)
+    h = historical_put_outcome(flat, 365, 0.8, 0.05)
+    assert h["itm"] == 0 and h["payout"] == 0 and h["windows"] > 10
+    # 一年后价格减半的序列：每个窗口都跌破 0.8 → 赔付 0.8-0.5=0.3
+    halving = pd.Series(0.5 ** (np.arange(4000) / 365), index=idx)
+    h2 = historical_put_outcome(halving, 365, 0.8, 0.05)
+    assert h2["breach"] == pytest.approx(1.0)
+    assert h2["payout"] == pytest.approx(0.3, abs=1e-6)
+    short = historical_put_outcome(flat.iloc[:500], 365, 0.8, 0.05)
+    assert math.isnan(short["itm"]) and short["starts"] == 0
 
 
 def test_options_research_config_symbols_get_price_updates():

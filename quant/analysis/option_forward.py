@@ -154,3 +154,78 @@ def forward_summary(settled: pd.DataFrame, index_symbols: set[str] | None = None
             "最差≈几笔权利金": abs(worst) / avg_prem if avg_prem > 0 and worst < 0 else math.nan,
         })
     return pd.DataFrame(rows)
+
+
+# ---------- 远期 put 观测（>1 年到期，2026-10-15 起）----------
+# 只观测不出信号：看"愿意在跌 X% 后接货、提前一两年收多少钱"，配上标的自身历史里
+# 同样期限跌破盈亏平衡的频率当参照。远期合约要一年以上才到期，前向结算短期内不会有结果。
+
+def leaps_metrics(annotated: pd.DataFrame, min_dte: int = 365) -> pd.DataFrame:
+    """筛出 dte ≥ min_dte 的报价，补中间价、买卖价差、盈亏平衡价与盈亏平衡跌幅。
+
+    - be_buffer：到期时标的要比现价跌超过这个比例，卖方才开始亏（= 1 − (K − 买价)/S）
+    - spread：(卖价 − 买价) / 中间价，远期合约流动性差，价差大时买价成交本身就是让利
+    """
+    q = annotated[annotated["dte"] >= min_dte].copy() if not annotated.empty else annotated.copy()
+    if q.empty:
+        return q
+    ok = (q["bid"] > 0) & (q["ask"] > 0)
+    q["mid"] = ((q["bid"] + q["ask"]) / 2).where(ok)
+    q["spread"] = ((q["ask"] - q["bid"]) / q["mid"]).where(ok)
+    q["breakeven"] = q["strike"] - q["bid"]
+    q["be_buffer"] = 1 - q["breakeven"] / q["spot"]
+    return q
+
+
+def leaps_grid(leaps: pd.DataFrame, expiration: str,
+               buffers: tuple[float, ...] = (0.2, 0.3, 0.4, 0.5)) -> pd.DataFrame:
+    """指定到期日下，每个标的在各目标下跌缓冲处取行权价最接近的那张（要求买价 > 0）。
+
+    同一合约若同时最接近两个目标（行权价稀疏）只保留一次。"""
+    q = leaps[(leaps["expiration"] == expiration) & (leaps["bid"] > 0)]
+    rows = []
+    for sym, g in q.groupby("symbol"):
+        seen = set()
+        for b in buffers:
+            r = g.loc[(g["buffer"] - b).abs().idxmin()]
+            if abs(r["buffer"] - b) > 0.05 or r["strike"] in seen:
+                continue
+            seen.add(r["strike"])
+            rows.append({**r.to_dict(), "target": b})
+    return pd.DataFrame(rows)
+
+
+MIN_INDEPENDENT_WINDOWS = 3   # 历史长度不足 3 个期限时，历史频率没有参考意义
+
+
+def historical_put_outcome(close: pd.Series, horizon_days: int, moneyness: float,
+                           premium: float) -> dict:
+    """把这张 put 放回标的自己的历史：任一天起卖出、持有 horizon_days 个日历天到期，结果如何。
+
+    moneyness = 行权价/现价，premium = 买价/现价（都按"现价 = 1"归一）。返回：
+    - itm：到期跌破行权价的比例；breach：跌破盈亏平衡（真正亏钱）的比例
+    - payout：到期平均赔付（占卖出时现价）——与 premium 对比就是"历史上这份保险收贵了还是便宜了"
+    - starts：起点数；windows：独立窗口数 ≈ 历史长度/期限（窗口高度重叠，它才是真实样本量）
+    历史不足 MIN_INDEPENDENT_WINDOWS 个期限时比例均为 nan。用原始收盘（拆股已复权），与到期结算口径一致。
+
+    注意：这些标的大多是**事后看涨得最好的**那批，历史漂移偏高 → 历史赔付系统性偏低、卖方显得更划算。
+    """
+    s = close.dropna()
+    out = {"itm": math.nan, "breach": math.nan, "payout": math.nan, "starts": 0, "windows": 0.0}
+    if s.empty:
+        return out
+    span = (s.index[-1] - s.index[0]).days
+    out["windows"] = span / horizon_days
+    if out["windows"] < MIN_INDEPENDENT_WINDOWS:
+        return out
+    target = s.index + pd.Timedelta(days=horizon_days)
+    valid = target <= s.index[-1]
+    end = pd.Series(s.reindex(target[valid], method="ffill").to_numpy(), index=s.index[valid])
+    rel = end / s[valid]
+    out.update({
+        "itm": float((rel < moneyness).mean()),
+        "breach": float((rel < moneyness - premium).mean()),
+        "payout": float((moneyness - rel).clip(lower=0).mean()),
+        "starts": int(valid.sum()),
+    })
+    return out

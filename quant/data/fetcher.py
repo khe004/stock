@@ -541,7 +541,8 @@ def update_option_snapshots(conn, symbols: list[str], min_dte: int = 7, max_dte:
                             moneyness: tuple[float, float] = (0.75, 1.02),
                             report: dict | None = None) -> tuple[int, list[str]]:
     """逐标的存当天期权快照。快照日 = 该标的库内最新行情日（报价对应的交易日），
-    spot 也取库内该日收盘——与日后结算用的价格同源。同日已存则跳过（幂等）。
+    spot 也取库内该日收盘——与日后结算用的价格同源。同日该到期窗口已存则跳过（幂等），
+    所以近月与远期两档可以对同一标的各采一次。
 
     返回 (成功数, 失败列表)；单个失败只记日志，不中断批量，也不影响信号主流程。"""
     ok, failed = 0, []
@@ -552,7 +553,7 @@ def update_option_snapshots(conn, symbols: list[str], min_dte: int = 7, max_dte:
             if report is not None:
                 report[symbol] = ("failed", "库内无行情，无法确定快照日与现价")
             continue
-        if store.has_option_snapshot(conn, as_of, symbol):
+        if store.has_option_window(conn, as_of, symbol, min_dte, max_dte):
             if report is not None:
                 report[symbol] = ("skipped", f"{as_of} 已有快照")
             continue

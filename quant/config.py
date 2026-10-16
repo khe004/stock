@@ -81,18 +81,27 @@ class Config:
                 out.append((name, {k: v for k, v in params.items() if k != "enabled"}))
         return out
 
-    @property
-    def options_research(self) -> dict:
-        """期权链快照采集配置（enabled/symbols/min_dte/max_dte/moneyness）。"""
-        raw = self.raw.get("options_research", {}) or {}
-        lo, hi = raw.get("moneyness", [0.75, 1.02])
+    def _option_window(self, key: str, min_dte: int, max_dte: int,
+                       moneyness: tuple[float, float]) -> dict:
+        raw = self.raw.get(key, {}) or {}
+        lo, hi = raw.get("moneyness", list(moneyness))
         return {
             "enabled": bool(raw.get("enabled", False)),
             "symbols": list(dict.fromkeys(raw.get("symbols", []))),
-            "min_dte": int(raw.get("min_dte", 7)),
-            "max_dte": int(raw.get("max_dte", 60)),
+            "min_dte": int(raw.get("min_dte", min_dte)),
+            "max_dte": int(raw.get("max_dte", max_dte)),
             "moneyness": (float(lo), float(hi)),
         }
+
+    @property
+    def options_research(self) -> dict:
+        """期权链快照采集配置（enabled/symbols/min_dte/max_dte/moneyness）。"""
+        return self._option_window("options_research", 7, 60, (0.75, 1.02))
+
+    @property
+    def options_leaps(self) -> dict:
+        """远期 put 观测配置（>1 年到期、行权价低于现价），字段同 options_research。"""
+        return self._option_window("options_leaps", 365, 1200, (0.30, 1.00))
 
     @property
     def telegram_enabled(self) -> bool:

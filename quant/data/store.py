@@ -900,16 +900,28 @@ def has_option_snapshot(conn: sqlite3.Connection, snapshot_date: str, symbol: st
     return row is not None
 
 
+def has_option_window(conn: sqlite3.Connection, snapshot_date: str, symbol: str,
+                      min_dte: int, max_dte: int) -> bool:
+    """该日该标的是否已存有到期日落在 [min_dte, max_dte] 日历天内的报价。
+
+    近月（7~60 天）与远期（>1 年）两档存在同一张表里，跳过判断要按到期窗口分开。"""
+    row = conn.execute(
+        "SELECT 1 FROM option_quotes WHERE snapshot_date = ? AND symbol = ? "
+        "AND expiration BETWEEN date(?, ?) AND date(?, ?) LIMIT 1",
+        (snapshot_date, symbol, snapshot_date, f"+{int(min_dte)} days",
+         snapshot_date, f"+{int(max_dte)} days")).fetchone()
+    return row is not None
+
+
 def save_option_snapshot(conn: sqlite3.Connection, snapshot_date: str, symbol: str,
                          spot: float | None, next_earnings: str | None,
                          quotes: pd.DataFrame, captured_at: str) -> int:
-    """写入一个标的一天的期权快照（幂等：同日同标的重复写入被忽略，先到为准）。
+    """写入一个标的一天的期权快照（幂等：同一报价重复写入被忽略，先到为准）。
 
+    同日同标的已有快照时只追加新的报价行（如近月之后再采远期档），快照元数据
+    （spot/财报日/抓取时刻）保持第一次写入的值，n_quotes 更新为实际行数。
     quotes 需含 expiration/option_type/strike/bid/ask/last/volume/open_interest/iv/last_trade。
     返回新写入的报价行数。"""
-    if has_option_snapshot(conn, snapshot_date, symbol):
-        return 0
-
     def _num(v, cast=float):
         return cast(v) if v is not None and pd.notna(v) else None
 
@@ -920,13 +932,19 @@ def save_option_snapshot(conn: sqlite3.Connection, snapshot_date: str, symbol: s
          None if pd.isna(r.get("last_trade")) else str(r.get("last_trade")))
         for _, r in quotes.iterrows()
     ]
+    before = conn.total_changes
     conn.executemany(
         "INSERT OR IGNORE INTO option_quotes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+    inserted = conn.total_changes - before
     conn.execute(
         "INSERT OR IGNORE INTO option_snapshots VALUES (?,?,?,?,?,?)",
         (snapshot_date, symbol, spot, next_earnings, len(rows), captured_at))
+    conn.execute(
+        "UPDATE option_snapshots SET n_quotes = (SELECT COUNT(*) FROM option_quotes q "
+        "WHERE q.snapshot_date = ? AND q.symbol = ?) WHERE snapshot_date = ? AND symbol = ?",
+        (snapshot_date, symbol, snapshot_date, symbol))
     conn.commit()
-    return len(rows)
+    return inserted
 
 
 def load_option_snapshots(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -937,8 +955,8 @@ def load_option_snapshots(conn: sqlite3.Connection) -> pd.DataFrame:
 
 def load_option_quotes(conn: sqlite3.Connection, snapshot_date: str | None = None,
                        symbols: list[str] | None = None,
-                       option_type: str = "put") -> pd.DataFrame:
-    """读取报价，可按快照日/标的过滤，并带上当日 spot 与下次财报日。"""
+                       option_type: str = "put", min_dte: int | None = None) -> pd.DataFrame:
+    """读取报价，可按快照日/标的/最短剩余天数过滤，并带上当日 spot 与下次财报日。"""
     query = ("SELECT q.*, s.spot, s.next_earnings FROM option_quotes q "
              "JOIN option_snapshots s USING (snapshot_date, symbol) WHERE q.option_type = ?")
     params: list = [option_type]
@@ -948,5 +966,8 @@ def load_option_quotes(conn: sqlite3.Connection, snapshot_date: str | None = Non
     if symbols:
         query += f" AND q.symbol IN ({','.join('?' * len(symbols))})"
         params.extend(symbols)
+    if min_dte is not None:
+        query += " AND q.expiration >= date(q.snapshot_date, ?)"
+        params.append(f"+{int(min_dte)} days")
     query += " ORDER BY q.snapshot_date, q.symbol, q.expiration, q.strike"
     return pd.read_sql_query(query, conn, params=params)
