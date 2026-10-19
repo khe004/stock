@@ -24,6 +24,7 @@ from quant.analysis.quarterly_validation import (
 from quant.analysis.research_digest import build_research_digest
 from quant.config import ROOT, load_config
 from quant.data import fetcher, store
+from quant.data.calendar import is_trading_day
 from quant.notify import email, telegram, wechat
 from quant.strategies.base import BUY
 
@@ -351,7 +352,11 @@ def main(argv: list[str] | None = None) -> int:
         log.info("backfill 完成：%d 条历史信号已标记为已通知（不推送）", marked)
         return 0
 
-    if not args.no_notify:
+    # 休市日（周末/节假日）照常拉数据、入库，但不发任何消息；待发信号留到下个交易日一起发
+    market_closed = not args.date and not is_trading_day(_date.today())
+    if market_closed and not args.no_notify:
+        log.info("今天（%s）美股休市，不发送日报", _date.today())
+    if not args.no_notify and not market_closed:
         # 仅观察策略（config 里 notify: false）：信号入库但不推送
         observe_only = {name for name, p in cfg.enabled_strategies()
                         if not p.get("notify", True)}

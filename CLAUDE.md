@@ -19,6 +19,8 @@ streamlit run quant/web/app.py            # 面板（市场概览/信号历史/K
 ## 架构速览
 
 - `run_daily.py`：主入口。拉数据 → 各策略 generate → 信号入库（唯一约束幂等）→ dispatch 推送
+  （**美股休市日不发任何消息**：`quant/data/calendar.py` 按规则推算 NYSE 假日，与 2005+ 真实交易日核对一致，
+  仅临时休市如国丧日无法预知；休市日照常拉数据入库，待发信号留到下个交易日）
 - `quant/config.py`：config.yaml + .env；`update_symbols` = watchlist + 各策略 universe_file
 - `quant/data/`：yfinance 增量拉取（首拉空表报错；比对重叠日复权比例，发现新分红/拆股自动全量重拉该标的——
   否则分红会从总回报序列里消失，2026-10-14 曾因此让 BIL 3.5 个月总回报从 +1.03% 变成 +0.13%）、SQLite；
